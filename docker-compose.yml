@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ficbrain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ficbrain_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-ficbrain}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # 5433 на хосте, чтобы не конфликтовать с локальным PostgreSQL на 5432
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ficbrain} -d ${POSTGRES_DB:-ficbrain}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build: .
+    command: python -m app.main
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ficbrain}:${POSTGRES_PASSWORD:-ficbrain_secret}@postgres:5432/${POSTGRES_DB:-ficbrain}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./:/app
+      - tmp_data:/app/data/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: arq app.worker.WorkerSettings
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ficbrain}:${POSTGRES_PASSWORD:-ficbrain_secret}@postgres:5432/${POSTGRES_DB:-ficbrain}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./:/app
+      - tmp_data:/app/data/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  tmp_data:

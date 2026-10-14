@@ -1,0 +1,3 @@
+Для Excel используйте тот же набор колонок, что в works_template.csv.
+Можно открыть CSV в Excel/Google Sheets и сохранить как .xlsx —
+импорт `python -m app.cli import-works file.xlsx` поддерживает оба формата.
