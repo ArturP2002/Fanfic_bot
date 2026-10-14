@@ -196,6 +196,29 @@ async def _download_with_ytdlp(
     return dest, info
 
 
+def _clean_instagram_url(url: str) -> str:
+    """Убирает трекинг-параметры (?psln=…) — Apify ждёт чистый reel/profile URL."""
+    return url.split("?", 1)[0].rstrip("/") + "/"
+
+
+def _apify_run_input(url: str, platform: str) -> dict[str, Any]:
+    """Собирает input для Apify actor по площадке."""
+    if platform == "instagram":
+        # apify/instagram-reel-scraper: username[] принимает usernames И direct reel URLs.
+        # Пустой username: [] падает валидацией (minItems: 1); directUrls у этого actor нет.
+        return {
+            "username": [_clean_instagram_url(url)],
+            "resultsLimit": 1,
+        }
+    # clockworks/tiktok-scraper: shouldDownloadVideos — платный add-on,
+    # но без него mediaUrls часто пустой
+    return {
+        "postURLs": [url],
+        "resultsPerPage": 1,
+        "shouldDownloadVideos": True,
+    }
+
+
 async def _download_with_apify(url: str, target_dir: Path, platform: str) -> tuple[Path, dict]:
     """Запасной путь через Apify (с shouldDownloadVideos для TikTok)."""
     settings = get_settings()
@@ -209,19 +232,9 @@ async def _download_with_apify(url: str, target_dir: Path, platform: str) -> tup
 
     if platform == "instagram":
         actor_id = settings.apify_instagram_actor
-        run_input = {
-            "username": [],
-            "directUrls": [url],
-            "resultsLimit": 1,
-        }
     else:
         actor_id = settings.apify_tiktok_actor
-        # shouldDownloadVideos — платный add-on, но без него mediaUrls часто пустой
-        run_input = {
-            "postURLs": [url],
-            "resultsPerPage": 1,
-            "shouldDownloadVideos": True,
-        }
+    run_input = _apify_run_input(url, platform)
 
     logger.info(
         "Запуск Apify: actor=%s platform=%s shouldDownloadVideos=%s",
