@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 HIGH_SCORE = 92
 MEDIUM_SCORE = 78
 _MAX_SEARCHES_PER_BATCH = 5
+# Поиск не должен съедать весь ARQ job_timeout после долгого скачивания рилса
+_SEARCH_HTTP_TIMEOUT = 12.0
+_SEARCH_HTTP_ATTEMPTS = 2
+_ENRICH_PER_TITLE_TIMEOUT = 35.0
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 
 
@@ -161,25 +166,32 @@ def ao3_search_url(title: str, author: str | None = None) -> str:
 
 
 def ficbook_search_url(title: str, author: str | None = None) -> str:
-    # find по названию; автор — доп. параметр, если площадка примет
-    q = title
-    if author:
-        q = f"{title} {author}"
-    return f"https://ficbook.net/find?title={quote_plus(title)}&q={quote_plus(q)}"
+    # /find часто отдаёт 403 ботам; search/fanfiction стабильнее
+    q = title if not author else f"{title} {author}"
+    return f"https://ficbook.net/search/fanfiction?q={quote_plus(q)}"
+
+
+async def _fetch_search_html(url: str) -> str:
+    """Быстрый fetch для поиска: короткий timeout, мало ретраев."""
+    return await fetch_html(
+        url,
+        timeout=_SEARCH_HTTP_TIMEOUT,
+        attempts=_SEARCH_HTTP_ATTEMPTS,
+    )
 
 
 async def _search_one_platform(
     platform: str, title: str, author: str | None
 ) -> list[SearchHit]:
-    """Один HTTP-поиск + parse HTML."""
+    """Один HTTP-поиск + parse HTML (ошибки глотаем — enrich не обязателен)."""
     try:
         if platform == "ao3":
             url = ao3_search_url(title, author)
-            html = await fetch_html(url)
+            html = await _fetch_search_html(url)
             hits = parse_ao3_search_html(html)
         else:
             url = ficbook_search_url(title, author)
-            html = await fetch_html(url)
+            html = await _fetch_search_html(url)
             hits = parse_ficbook_search_html(html)
         logger.info(
             "Поиск %s «%s»: кандидатов=%s",
@@ -188,12 +200,17 @@ async def _search_one_platform(
             len(hits),
         )
         return hits
-    except Exception:
-        logger.exception("Ошибка поиска %s для «%s»", platform, title)
+    except Exception as exc:
+        logger.warning(
+            "Поиск %s для «%s» не удался: %s",
+            platform,
+            title,
+            exc,
+        )
         return []
 
 
-async def enrich_from_platforms(
+async def _enrich_from_platforms_inner(
     title: str,
     author: str | None = None,
 ) -> EnrichmentResult:
@@ -239,6 +256,28 @@ async def enrich_from_platforms(
     if best.score >= MEDIUM_SCORE:
         return EnrichmentResult(confidence="medium", hits=ranked[:3])
     return EnrichmentResult(confidence="none", hits=ranked[:3])
+
+
+async def enrich_from_platforms(
+    title: str,
+    author: str | None = None,
+) -> EnrichmentResult:
+    """Обёртка с жёстким deadline — не валит весь video_url job."""
+    try:
+        return await asyncio.wait_for(
+            _enrich_from_platforms_inner(title, author),
+            timeout=_ENRICH_PER_TITLE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Enrich timeout (%.0f с) для «%s» — продолжаем без досье",
+            _ENRICH_PER_TITLE_TIMEOUT,
+            title,
+        )
+        return EnrichmentResult(confidence="none", hits=[])
+    except Exception:
+        logger.exception("Enrich упал для «%s» — продолжаем без досье", title)
+        return EnrichmentResult(confidence="none", hits=[])
 
 
 class SearchBudget:

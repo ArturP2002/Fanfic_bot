@@ -366,6 +366,8 @@ class WorkerSettings:
     """Настройки ARQ worker."""
 
     functions = [process_video_url, process_video_file, process_screenshots]
+    # Скачивание IG + Whisper/OCR + enrich легко > 5 мин
+    job_timeout = 900
     redis_settings = property(lambda self: _redis_settings())  # type: ignore
 
     @staticmethod
@@ -374,9 +376,10 @@ class WorkerSettings:
         apply_proxy_env()
         settings = get_settings()
         logger.info(
-            "ARQ worker запущен. redis=%s functions=%s",
+            "ARQ worker запущен. redis=%s functions=%s job_timeout=%s",
             settings.redis_url,
             [fn.__name__ for fn in WorkerSettings.functions],
+            WorkerSettings.job_timeout,
         )
 
     @staticmethod

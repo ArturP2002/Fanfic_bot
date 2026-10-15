@@ -97,7 +97,15 @@ async def _create_from_platform_enrichment(
         logger.info("Лимит внешних поисков исчерпан — без enrich для «%s»", item.title)
         return None, "none", True
 
-    result = await enrich_from_platforms(item.title, item.author)
+    try:
+        result = await enrich_from_platforms(item.title, item.author)
+    except Exception:
+        logger.exception(
+            "Enrich неожиданно упал для «%s» — stub без досье",
+            item.title,
+        )
+        return None, "none", True
+
     if result.confidence == "high" and result.parsed:
         parsed = result.parsed
         existing = None

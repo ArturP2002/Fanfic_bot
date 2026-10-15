@@ -82,29 +82,36 @@ def _is_retryable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
-async def fetch_html(url: str) -> str:
+async def fetch_html(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    attempts: int = FETCH_ATTEMPTS,
+) -> str:
     """Загружает HTML страницы, повторяя запрос при временных сбоях."""
     import httpx
 
     headers = {
         "User-Agent": (
-            "FicBrainBot/1.0 (+https://t.me/; educational; metadata only)"
+            "Mozilla/5.0 (compatible; FicBrainBot/1.0; +https://t.me/; metadata only)"
         ),
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ru,en;q=0.9",
     }
-    async with httpx_client(timeout=30.0) as client:
-        for attempt in range(1, FETCH_ATTEMPTS + 1):
+    max_attempts = max(1, attempts)
+    async with httpx_client(timeout=timeout) as client:
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = await client.get(url, headers=headers)
                 response.raise_for_status()
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:
-                if attempt == FETCH_ATTEMPTS or not _is_retryable(exc):
+                if attempt == max_attempts or not _is_retryable(exc):
                     raise
                 logger.warning(
                     "Временная ошибка загрузки %s (попытка %s/%s): %s",
                     url,
                     attempt,
-                    FETCH_ATTEMPTS,
+                    max_attempts,
                     exc,
                 )
                 await asyncio.sleep(FETCH_RETRY_DELAY_SECONDS * attempt)

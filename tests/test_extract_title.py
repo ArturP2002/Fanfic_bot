@@ -1,12 +1,14 @@
 """Проверки валидации названий и эвристики извлечения."""
 
 from app.services.extract import (
+    ExtractedWork,
     _is_valid_title,
     _simple_named_extract,
     extract_from_list_heuristic,
     is_junk_title,
     is_short_catalog_query,
     is_social_handle,
+    scrub_authors_that_are_titles,
 )
 
 
@@ -72,3 +74,25 @@ def test_social_handle_author():
     assert not is_social_handle("SenLinYu")
     assert not is_social_handle("Мария Черри")
     assert not is_social_handle("IsForGood")
+
+
+def test_scrub_author_that_is_another_title():
+    works = scrub_authors_that_are_titles(
+        [
+            ExtractedWork(title="Принцесса Иерусалимская", confidence=0.9),
+            ExtractedWork(
+                title="О рыбаках и рыбках",
+                author="Принцесса Иерусалимская",
+                confidence=0.9,
+            ),
+        ]
+    )
+    assert works[1].author is None
+
+
+def test_ficbook_search_url_uses_search_path():
+    from app.services.platform_search import ficbook_search_url
+
+    url = ficbook_search_url("Рождество Темис")
+    assert "/search/fanfiction" in url
+    assert "/find?" not in url

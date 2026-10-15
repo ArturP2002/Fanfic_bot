@@ -247,6 +247,7 @@ async def _llm_extract(
         "Не бери темы подборок и заголовки роликов "
         "(«лучшие фф где…», «топ 10», «подборка», «рекомендации») — это не названия. "
         "Не используй Instagram/TikTok username (@handle) как author фанфика. "
+        "Не ставь название другого фанфика из того же списка в поле author. "
         "Название обычно короткое: до 8 слов. "
         "Сокращения и аббревиатуры (MOAM, DMATMOOBIL, LH) — валидные названия, "
         "если весь ввод или пункт списка ими является; не отбрасывай их. "
@@ -332,6 +333,24 @@ def _text_fallback(text: str, heuristic: list[ExtractedWork] | None) -> list[Ext
     return _simple_named_extract(text or "")
 
 
+def scrub_authors_that_are_titles(works: list[ExtractedWork]) -> list[ExtractedWork]:
+    """Сбрасывает author, если он совпадает с другим title в том же списке."""
+    titles = {normalize_loose(w.title) for w in works if w.title}
+    for work in works:
+        if work.author and normalize_loose(work.author) in titles:
+            logger.info(
+                "Сброс author=«%s» — это другое название из списка",
+                work.author,
+            )
+            work.author = None
+    return works
+
+
+def normalize_loose(value: str) -> str:
+    """Грубая нормализация для сравнения title/author внутри batch."""
+    return " ".join((value or "").casefold().split())
+
+
 async def extract_works_with_llm(
     text: str,
     *,
@@ -366,9 +385,9 @@ async def extract_works_with_llm(
         if from_media:
             # Без LLM по медиа берём только caption как текст, если он есть
             if caption and not transcript and not ocr_text:
-                return _simple_named_extract(caption)
+                return scrub_authors_that_are_titles(_simple_named_extract(caption))
             return []
-        return _text_fallback(text or "", heuristic)
+        return scrub_authors_that_are_titles(_text_fallback(text or "", heuristic))
 
     try:
         result = await _llm_extract(combined, from_media=from_media)
@@ -379,7 +398,7 @@ async def extract_works_with_llm(
         if from_media:
             # Не режем транскрипт на «фанфики» — лучше пустой результат
             return []
-        return _text_fallback(text or "", heuristic)
+        return scrub_authors_that_are_titles(_text_fallback(text or "", heuristic))
 
     # LLM вернул пусто на обычном тексте — пробуем эвристику (MOAM и т.п.)
     if not result and not from_media:
@@ -389,8 +408,8 @@ async def extract_works_with_llm(
                 "LLM пусто — эвристический fallback: %s",
                 [item.title for item in fallback],
             )
-        return fallback
-    return result
+        return scrub_authors_that_are_titles(fallback)
+    return scrub_authors_that_are_titles(result)
 
 
 def _simple_named_extract(text: str) -> list[ExtractedWork]:
