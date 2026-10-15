@@ -12,6 +12,7 @@ from app.models.enums import ConfirmationStatus, ReadingStatus
 from app.services import library as library_service
 from app.services.extract import ExtractedWork, _is_valid_title
 from app.services.matching import find_matches
+from app.services.platform_search import SearchBudget, enrich_from_platforms
 from app.services.works import (
     create_work,
     enrich_work,
@@ -85,16 +86,108 @@ class ResolutionBatch:
         ]
 
 
+async def _create_from_platform_enrichment(
+    session: AsyncSession,
+    item: ExtractedWork,
+    *,
+    search_budget: SearchBudget,
+) -> tuple[Work | None, str, bool]:
+    """Пробует AO3/Ficbook. Возвращает (work|None, match_confidence, needs_confirm)."""
+    if not search_budget.take():
+        logger.info("Лимит внешних поисков исчерпан — без enrich для «%s»", item.title)
+        return None, "none", True
+
+    result = await enrich_from_platforms(item.title, item.author)
+    if result.confidence == "high" and result.parsed:
+        parsed = result.parsed
+        existing = None
+        if parsed.source_url:
+            existing = await find_work_by_url(session, parsed.source_url)
+        if existing:
+            await enrich_work(
+                session,
+                existing,
+                fandom=parsed.fandom,
+                pairing=parsed.pairing,
+                status=parsed.status,
+                word_count=parsed.word_count,
+                tags=parsed.tags,
+                source_url=parsed.source_url,
+                extra_titles=[item.title, parsed.title],
+            )
+            logger.info(
+                "Enrich high: существующая work_id=%s «%s»",
+                existing.id,
+                existing.title,
+            )
+            return existing, "high", False
+
+        author_ok = bool(parsed.author) and (
+            not item.author
+            or normalize_authors_close(item.author, parsed.author)
+        )
+        work = await create_work(
+            session,
+            title=parsed.title or item.title,
+            author=parsed.author or item.author,
+            fandom=parsed.fandom,
+            pairing=parsed.pairing,
+            status=parsed.status or "unknown",
+            word_count=parsed.word_count,
+            volume_label=volume_from_words(parsed.word_count),
+            tags=parsed.tags,
+            source_url=parsed.source_url,
+            confirmation_status=(
+                ConfirmationStatus.CONFIRMED.value
+                if author_ok
+                else ConfirmationStatus.NEEDS_REVIEW.value
+            ),
+            other_titles=[item.title] if item.title != parsed.title else None,
+        )
+        needs_confirm = (
+            work.confirmation_status == ConfirmationStatus.NEEDS_REVIEW.value
+        )
+        logger.info(
+            "Enrich high: новая work_id=%s «%s» platform=%s confirm=%s",
+            work.id,
+            work.title,
+            parsed.platform,
+            needs_confirm,
+        )
+        return work, "high", needs_confirm
+
+    if result.confidence == "medium":
+        logger.info(
+            "Enrich medium для «%s»: hits=%s — нужна ручная проверка",
+            item.title,
+            len(result.hits or []),
+        )
+        return None, "medium", True
+
+    return None, "none", True
+
+
+def normalize_authors_close(a: str, b: str) -> bool:
+    """Грубая проверка совпадения авторов без циклического импорта matching."""
+    from rapidfuzz import fuzz
+
+    from app.services.normalize import normalize_text
+
+    return fuzz.token_set_ratio(normalize_text(a), normalize_text(b)) >= 85
+
+
 async def resolve_extracted(
     session: AsyncSession,
     user_id: int,
     extracted: list[ExtractedWork],
     *,
     auto_create_low_confidence: bool = False,
+    platform_enrich: bool = True,
 ) -> ResolutionBatch:
     """Сопоставляет извлечённые названия с базой и библиотекой пользователя."""
     batch = ResolutionBatch()
     seen_work_ids: set[int] = set()
+    search_budget = SearchBudget()
 
     for item in extracted:
         match = await find_matches(session, item.title, item.author)
@@ -116,14 +209,37 @@ async def resolve_extracted(
             if match.best:
                 resolved.work = match.best.work
         else:
-            # Новое для каталога — только валидный title и confidence >= 0.7
-            # Обрывки речи не пишем в works даже с needs_review
+            # Новое для каталога — сначала platform enrich, потом stub
             title_ok = _is_valid_title(item.title)
             can_create = (
                 auto_create_low_confidence
                 or (title_ok and item.confidence >= _AUTO_CREATE_CONFIDENCE)
             )
-            if can_create and title_ok:
+            enriched_work = None
+            enrich_conf = "none"
+            needs_confirm = True
+            if platform_enrich and can_create and title_ok:
+                (
+                    enriched_work,
+                    enrich_conf,
+                    needs_confirm,
+                ) = await _create_from_platform_enrichment(
+                    session, item, search_budget=search_budget
+                )
+
+            if enriched_work:
+                if enriched_work.id in seen_work_ids:
+                    logger.info("Пропуск дубля после enrich work_id=%s", enriched_work.id)
+                    continue
+                seen_work_ids.add(enriched_work.id)
+                resolved.work = enriched_work
+                resolved.match_confidence = enrich_conf
+                resolved.is_new_for_catalog = True
+                resolved.needs_catalog_confirm = needs_confirm
+                resolved.library_item = await library_service.get_library_item(
+                    session, user_id, enriched_work.id
+                )
+            elif can_create and title_ok:
                 work = await create_work(
                     session,
                     title=item.title,
@@ -138,10 +254,10 @@ async def resolve_extracted(
                 resolved.is_new_for_catalog = True
                 resolved.needs_catalog_confirm = (
                     work.confirmation_status == ConfirmationStatus.NEEDS_REVIEW.value
+                    or enrich_conf == "medium"
                 )
                 seen_work_ids.add(work.id)
             else:
-                # Пункт в результате без work — нужно подтверждение / пропуск
                 resolved.needs_catalog_confirm = True
                 logger.info(
                     "Извлечение без записи в каталог: «%s» conf=%.2f valid=%s",

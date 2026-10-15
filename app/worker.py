@@ -17,14 +17,23 @@ from arq.connections import RedisSettings
 from app import texts
 from app.config import get_settings
 from app.db.session import async_session_factory
-from app.keyboards import batch_result_keyboard, choose_candidate_keyboard, confirm_match_keyboard
+from app.keyboards import (
+    batch_result_keyboard,
+    choose_candidate_keyboard,
+    confirm_match_keyboard,
+    single_add_keyboard,
+)
 from app.logging_config import setup_logging
 from app.proxy import apply_proxy_env, create_bot
 from app.models import ProcessingJob
 from app.models.enums import JobStatus, SourceType
 from app.services import library as library_service
 from app.services.batch_store import batch_from_resolution, save_batch
-from app.services.formatting import format_batch_summary
+from app.services.formatting import (
+    format_batch_summary,
+    format_catalog_confirm,
+    format_single_work,
+)
 from app.services.media.errors import (
     DownloadError,
     PipelineError,
@@ -162,13 +171,27 @@ async def _finish_with_batch(
             elif item.needs_catalog_confirm and item.work:
                 await _notify(
                     job.telegram_chat_id,
-                    "Похоже, нашла новый для FicBrain фанфик:\n\n"
-                    f"{item.work.title}\n{item.work.author or ''}",
+                    format_catalog_confirm(item),
                     confirm_match_keyboard(token, idx),
                 )
 
         if not batch.items:
             await _notify(job.telegram_chat_id, texts.NOTHING_FOUND)
+        elif (
+            len(batch.items) == 1
+            and batch.items[0].work
+            and not batch.items[0].needs_user_choice
+            and not batch.items[0].needs_catalog_confirm
+        ):
+            item = batch.items[0]
+            if item.library_item:
+                await _notify(job.telegram_chat_id, texts.ALREADY_IN_LIBRARY)
+            else:
+                await _notify(
+                    job.telegram_chat_id,
+                    format_single_work(item),
+                    single_add_keyboard(item.work.id),
+                )
         else:
             await _notify(
                 job.telegram_chat_id,

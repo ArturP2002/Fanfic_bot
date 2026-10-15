@@ -36,6 +36,24 @@ _BAD_TITLE_MARKERS = (
     "текст с изображений",
     "user text",
 )
+# Темы подборок / заголовки роликов, не названия отдельных фиков
+_LISTICLE_JUNK_MARKERS = (
+    "лучшие фф",
+    "лучшие фанфики",
+    "лучшие фики",
+    "лучшие фиксы",
+    "топ фф",
+    "топ 10",
+    "top 10",
+    "подборка",
+    "рекомендац",
+    "где драко",
+    "где гермион",
+    "фф где",
+    "фики где",
+    "фанфики где",
+    "одержим",
+)
 # Типичные речевые обрывки, которые эвристика ошибочно принимает за названия
 _SPEECH_JUNK_MARKERS = (
     "потому что",
@@ -72,6 +90,12 @@ _SPEECH_JUNK_MARKERS = (
     "фиксов",
     "тоже рекомендую",
 )
+# «где X …» без кавычек — описание темы, не title
+_WHERE_PAIRING_RE = re.compile(
+    r"\bгде\b.+\b(драко|гермион|гарри|северус|снейп|том|грейнджер)\b",
+    re.I,
+)
+_HANDLE_AUTHOR_RE = re.compile(r"^@?[\w.]{3,30}$")
 # Названия редко начинаются с союза/местоимения разговорной речи
 _SPEECH_STARTS = (
     "и ",
@@ -128,6 +152,10 @@ def is_junk_title(title: str) -> bool:
     lower = cleaned.lower()
     if any(marker in lower for marker in _SPEECH_JUNK_MARKERS):
         return True
+    if any(marker in lower for marker in _LISTICLE_JUNK_MARKERS):
+        return True
+    if _WHERE_PAIRING_RE.search(cleaned):
+        return True
     if any(lower.startswith(start) for start in _SPEECH_STARTS):
         return True
     if any(marker in lower for marker in _BAD_TITLE_MARKERS):
@@ -137,6 +165,25 @@ def is_junk_title(title: str) -> bool:
     # Несколько предложений / точки внутри — почти наверняка речь
     if cleaned.count(".") >= 1 and len(cleaned) > 40:
         return True
+    return False
+
+
+def is_social_handle(author: str | None) -> bool:
+    """True, если author похож на Instagram/TikTok username, а не на имя автора фика.
+
+    Не трогаем обычные ники авторов (SenLinYu): только @handle, snake_case / dots.
+    """
+    if not author:
+        return False
+    cleaned = author.strip()
+    if " " in cleaned:
+        return False
+    if any("\u0400" <= ch <= "\u04FF" for ch in cleaned):
+        return False
+    if cleaned.startswith("@"):
+        return True
+    if "_" in cleaned or "." in cleaned:
+        return bool(_HANDLE_AUTHOR_RE.match(cleaned.lstrip("@")))
     return False
 
 
@@ -181,10 +228,13 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return "rate limit" in text or "429" in text or "tokens per min" in text
 
 
-async def _llm_extract(combined: str) -> list[ExtractedWork]:
+async def _llm_extract(
+    combined: str, *, from_media: bool = False
+) -> list[ExtractedWork]:
     """Вызов LLM с retry на 429."""
     settings = get_settings()
     client = openai_client()
+    min_confidence = 0.5 if from_media else 0.35
     system = (
         "Ты помощник FicBrain. Из текста рекомендаций фанфиков извлеки все "
         "упомянутые произведения. Верни строго JSON-массив объектов "
@@ -194,10 +244,15 @@ async def _llm_extract(combined: str) -> list[ExtractedWork]:
         "Один объект = одно произведение. Язык названий сохраняй как в источнике. "
         "Не считай URL, ссылки Instagram/TikTok и служебные фразы названиями фанфиков. "
         "Не бери обрывки речи («потому что», «я должна», «номер 10 будет») как названия. "
+        "Не бери темы подборок и заголовки роликов "
+        "(«лучшие фф где…», «топ 10», «подборка», «рекомендации») — это не названия. "
+        "Не используй Instagram/TikTok username (@handle) как author фанфика. "
         "Название обычно короткое: до 8 слов. "
         "Сокращения и аббревиатуры (MOAM, DMATMOOBIL, LH) — валидные названия, "
         "если весь ввод или пункт списка ими является; не отбрасывай их. "
         "В описании поста Instagram/TikTok тоже ищи названия фанфиков. "
+        "Если на экране/в OCR нумерованный или маркированный список — "
+        "извлеки ВСЕ пункты-названия, не пропускай. "
         "Если произведений нет — верни {\"works\": []}."
     )
     messages = [
@@ -239,12 +294,15 @@ async def _llm_extract(combined: str) -> list[ExtractedWork]:
                     logger.info("Пропуск мусорного извлечения: %s", title)
                     continue
                 conf = float(item.get("confidence") or 0.5)
-                if conf < 0.35:
+                if conf < min_confidence:
                     logger.info("Пропуск неуверенного извлечения: %s", title)
                     continue
                 author = item.get("author")
                 if author:
                     author = str(author).strip() or None
+                if is_social_handle(author):
+                    logger.info("Сброс IG/TikTok handle как author: %s", author)
+                    author = None
                 result.append(ExtractedWork(title=title, author=author, confidence=conf))
             logger.info("LLM извлёк %s произведений", len(result))
             return result
@@ -313,7 +371,7 @@ async def extract_works_with_llm(
         return _text_fallback(text or "", heuristic)
 
     try:
-        result = await _llm_extract(combined)
+        result = await _llm_extract(combined, from_media=from_media)
     except RateLimitError:
         raise
     except Exception:

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         alias="APIFY_TIKTOK_ACTOR",
     )
 
-    video_max_frames: int = Field(default=6, alias="VIDEO_MAX_FRAMES")
+    video_max_frames: int = Field(default=12, alias="VIDEO_MAX_FRAMES")
     whisper_language: str = Field(default="ru", alias="WHISPER_LANGUAGE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     admin_telegram_ids: str = Field(default="", alias="ADMIN_TELEGRAM_IDS")

@@ -29,7 +29,12 @@ from app.models.enums import JobStatus, JobType, ReadingStatus, SourceType
 from app.services import library as library_service
 from app.services.batch_store import batch_from_resolution, load_batch, save_batch
 from app.services.extract import ExtractedWork, extract_works_with_llm, is_short_catalog_query
-from app.services.formatting import format_batch_summary, format_single_work
+from app.services.formatting import (
+    format_batch_list_from_payload,
+    format_batch_summary,
+    format_catalog_confirm,
+    format_single_work,
+)
 from app.services.matching import find_matches
 from app.services.media.download import detect_video_platform
 from app.services.parsers import detect_platform, parse_fic_url
@@ -307,9 +312,8 @@ async def _handle_fic_link(message: Message, url: str) -> None:
             work_ids=[resolved.work.id] if resolved.work else [],
         )
         _ = source
-        text = format_single_work(resolved)
         await message.answer(
-            f"Нашла фанфик:\n\n{resolved.work.title}\n{resolved.work.author or ''}".strip(),
+            format_single_work(resolved),
             reply_markup=single_add_keyboard(resolved.work.id),
         )
 
@@ -366,8 +370,7 @@ async def _handle_text_extract(message: Message, text: str) -> None:
                 )
             elif item.needs_catalog_confirm and item.work:
                 await message.answer(
-                    "Похоже, нашла новый для FicBrain фанфик:\n\n"
-                    f"{item.work.title}\n{item.work.author or ''}",
+                    format_catalog_confirm(item),
                     reply_markup=confirm_match_keyboard(token, idx),
                 )
 
@@ -379,6 +382,9 @@ async def _handle_text_extract(message: Message, text: str) -> None:
                     await message.answer(f"☑ Ты это уже читала.\n\n{item.work.title}")
                 else:
                     await message.answer(texts.ALREADY_IN_LIBRARY)
+                return
+            if item.needs_catalog_confirm:
+                # confirm уже отправлен выше
                 return
             await message.answer(
                 format_single_work(item),
@@ -401,19 +407,7 @@ async def batch_view(callback: CallbackQuery) -> None:
     if not payload:
         await callback.answer("Результаты устарели, пришли материал снова", show_alert=True)
         return
-    lines = ["Найденные работы:", ""]
-    for idx, item in enumerate(payload["items"], start=1):
-        line = f"{idx}. {item['title']}"
-        if item.get("author"):
-            line += f" — {item['author']}"
-        if item.get("library_status") == ReadingStatus.READ.value:
-            line += "\n   ☑ уже прочитан"
-        elif item.get("library_status") == ReadingStatus.WANT.value:
-            line += "\n   🔖 уже хочешь прочитать"
-        elif item.get("work_id") and not item.get("library_status"):
-            line += "\n   🆕 новая"
-        lines.append(line)
-    await callback.message.answer("\n".join(lines))
+    await callback.message.answer(format_batch_list_from_payload(payload))
     await callback.answer()
 
 

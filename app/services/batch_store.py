@@ -63,20 +63,24 @@ async def load_batch(token: str) -> dict[str, Any] | None:
 
 def batch_from_resolution(user_id: int, batch) -> dict[str, Any]:
     """Сериализует ResolutionBatch для хранения."""
+    from app.services.formatting import work_meta_snapshot
+
     items = []
     for item in batch.items:
-        items.append(
-            {
-                "title": item.extracted.title,
-                "author": item.extracted.author,
-                "confidence": item.extracted.confidence,
-                "work_id": item.work.id if item.work else None,
-                "library_status": item.reading_status,
-                "match_confidence": item.match_confidence,
-                "needs_user_choice": item.needs_user_choice,
-                "candidate_work_ids": item.candidate_work_ids,
-                "is_new_for_catalog": item.is_new_for_catalog,
-                "needs_catalog_confirm": item.needs_catalog_confirm,
-            }
-        )
+        title = (item.work.title if item.work else None) or item.extracted.title
+        author = (item.work.author if item.work else None) or item.extracted.author
+        row = {
+            "title": title,
+            "author": author,
+            "confidence": item.extracted.confidence,
+            "work_id": item.work.id if item.work else None,
+            "library_status": item.reading_status,
+            "match_confidence": item.match_confidence,
+            "needs_user_choice": item.needs_user_choice,
+            "candidate_work_ids": item.candidate_work_ids,
+            "is_new_for_catalog": item.is_new_for_catalog,
+            "needs_catalog_confirm": item.needs_catalog_confirm,
+        }
+        row.update(work_meta_snapshot(item.work))
+        items.append(row)
     return {"user_id": user_id, "items": items}
