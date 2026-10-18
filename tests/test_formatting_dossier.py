@@ -98,4 +98,6 @@ def test_batch_list_from_payload_shows_meta_or_hint():
     }
     text = format_batch_list_from_payload(payload)
     assert "Пейринг: Dramione" in text
-    assert "пока только название" in text
+    assert "нет досье" in text
+    # Пустая строка между пунктами
+    assert "\n\n2. Только название" in text

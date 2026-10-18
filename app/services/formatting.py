@@ -78,6 +78,19 @@ def work_meta_snapshot(work: Any) -> dict[str, Any]:
     }
 
 
+_NO_META_HINT = "нет досье — пришли ссылку AO3/Ficbook"
+
+
+def _join_batch_blocks(header: str, blocks: list[list[str]]) -> str:
+    """Склеивает пункты списка с пустой строкой между ними."""
+    parts: list[str] = [header, ""]
+    for i, block in enumerate(blocks):
+        if i:
+            parts.append("")
+        parts.extend(block)
+    return "\n".join(parts)
+
+
 def format_batch_summary(batch: ResolutionBatch) -> str:
     """Сводка: сколько новых / уже в библиотеке."""
     total = len([i for i in batch.items if i.work or i.needs_user_choice])
@@ -116,60 +129,59 @@ def format_batch_summary(batch: ResolutionBatch) -> str:
 
 def format_batch_list(batch: ResolutionBatch) -> str:
     """Полный список найденного с кратким досье."""
-    lines = ["Найденные работы:", ""]
+    blocks: list[list[str]] = []
     for idx, item in enumerate(batch.items, start=1):
         title = (item.work.title if item.work else None) or item.extracted.title
         author = (item.work.author if item.work else None) or item.extracted.author
-        head = f"{idx}. {title}"
-        if author:
-            head += f" — {author}"
+        block = [f"{idx}. {title}" + (f" — {author}" if author else "")]
+
         if item.platform_hits and not item.work:
-            head += "\n   ❓ есть варианты на площадках"
+            block.append("   ❓ есть варианты на площадках")
+            block.append("   выбери вариант из кнопок ниже")
         elif item.needs_user_choice:
-            head += "\n   ❓ нужно уточнить"
+            block.append("   ❓ нужно уточнить")
         elif item.library_item:
-            head += f"\n   {status_emoji_line(item.library_item.reading_status)}"
+            block.append(f"   {status_emoji_line(item.library_item.reading_status)}")
         elif item.work:
-            head += "\n   🆕 новая для тебя"
+            block.append("   🆕 новая для тебя")
         elif item.needs_catalog_confirm:
-            head += "\n   ❔ нужно подтверждение"
+            block.append("   ❔ нужно подтверждение")
         else:
-            head += "\n   ❔ пропущено"
-        lines.append(head)
+            block.append("   ❔ пропущено")
+
         if item.work and work_has_rich_meta(item.work):
-            lines.extend(brief_meta_lines(item.work))
+            block.extend(brief_meta_lines(item.work))
         elif item.platform_hits and not item.work:
-            lines.append("   выбери вариант из поиска AO3/Ficbook")
+            pass
         elif item.work or item.needs_catalog_confirm:
-            lines.append(
-                "   пока только название — пришли ссылку AO3/Ficbook, если знаешь"
-            )
-    return "\n".join(lines)
+            block.append(f"   {_NO_META_HINT}")
+        blocks.append(block)
+    return _join_batch_blocks("Найденные работы:", blocks)
 
 
 def format_batch_list_from_payload(payload: dict[str, Any]) -> str:
     """Список из сериализованного batch (callback «Посмотреть все»)."""
-    lines = ["Найденные работы:", ""]
+    blocks: list[list[str]] = []
     for idx, item in enumerate(payload.get("items") or [], start=1):
         title = item.get("title") or "?"
         author = item.get("author")
-        head = f"{idx}. {title}"
-        if author:
-            head += f" — {author}"
+        block = [f"{idx}. {title}" + (f" — {author}" if author else "")]
         status = item.get("library_status")
+
         if status == ReadingStatus.READ.value:
-            head += "\n   ☑ уже прочитан"
+            block.append("   ☑ уже прочитан")
         elif status == ReadingStatus.WANT.value:
-            head += "\n   🔖 уже хочешь прочитать"
+            block.append("   🔖 уже хочешь прочитать")
         elif item.get("platform_hits") and not item.get("work_id"):
-            head += "\n   ❓ есть варианты на площадках"
+            block.append("   ❓ есть варианты на площадках")
+            block.append("   выбери вариант из кнопок ниже")
         elif item.get("needs_user_choice"):
-            head += "\n   ❓ нужно уточнить"
+            block.append("   ❓ нужно уточнить")
         elif item.get("work_id") and not status:
-            head += "\n   🆕 новая"
+            block.append("   🆕 новая")
         elif item.get("needs_catalog_confirm"):
-            head += "\n   ❔ нужно подтверждение"
-        lines.append(head)
+            block.append("   ❔ нужно подтверждение")
+
         if item.get("has_meta"):
             stub = type(
                 "W",
@@ -182,14 +194,13 @@ def format_batch_list_from_payload(payload: dict[str, Any]) -> str:
                     "tags": item.get("tags"),
                 },
             )()
-            lines.extend(brief_meta_lines(stub))
+            block.extend(brief_meta_lines(stub))
         elif item.get("platform_hits") and not item.get("work_id"):
-            lines.append("   выбери вариант из поиска AO3/Ficbook")
+            pass
         elif item.get("work_id") or item.get("needs_catalog_confirm"):
-            lines.append(
-                "   пока только название — пришли ссылку AO3/Ficbook, если знаешь"
-            )
-    return "\n".join(lines)
+            block.append(f"   {_NO_META_HINT}")
+        blocks.append(block)
+    return _join_batch_blocks("Найденные работы:", blocks)
 
 
 _WORK_STATUS_RU = {
