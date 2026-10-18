@@ -68,9 +68,9 @@ def test_junk_listicle_titles():
 
 
 def test_social_handle_author():
-    assert is_social_handle("Mary_Cherry")
+    assert not is_social_handle("Mary_Cherry")  # ник на Ficbook, не IG
     assert is_social_handle("@some.user")
-    assert is_social_handle("user.name")
+    assert not is_social_handle("user.name")
     assert not is_social_handle("SenLinYu")
     assert not is_social_handle("Мария Черри")
     assert not is_social_handle("IsForGood")

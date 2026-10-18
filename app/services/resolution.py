@@ -30,15 +30,27 @@ logger = logging.getLogger(__name__)
 
 def _dedupe_extracted(items: list[ExtractedWork]) -> list[ExtractedWork]:
     """Убирает повторы одного названия в пакете (OCR+speech часто дублируют)."""
-    seen: set[str] = set()
+    from rapidfuzz import fuzz
+
     out: list[ExtractedWork] = []
     for item in items:
         key = normalize_text(item.title)
-        if not key or key in seen:
-            if key in seen:
-                logger.info("Пропуск дубля extract «%s»", item.title)
+        if not key:
             continue
-        seen.add(key)
+        dup_idx = None
+        for idx, prev in enumerate(out):
+            prev_key = normalize_text(prev.title)
+            if prev_key == key or float(fuzz.token_set_ratio(prev_key, key)) >= 92:
+                dup_idx = idx
+                break
+        if dup_idx is not None:
+            prev = out[dup_idx]
+            logger.info("Пропуск дубля extract «%s» (~ «%s»)", item.title, prev.title)
+            if item.from_ocr_dossier and not prev.from_ocr_dossier:
+                out[dup_idx] = item
+            elif item.has_dossier_meta and not prev.has_dossier_meta:
+                out[dup_idx] = item
+            continue
         out.append(item)
     return out
 
@@ -264,6 +276,28 @@ def normalize_authors_close(a: str, b: str) -> bool:
     return fuzz.token_set_ratio(normalize_text(a), normalize_text(b)) >= 85
 
 
+async def _apply_extracted_dossier(
+    session: AsyncSession,
+    work: Work,
+    item: ExtractedWork,
+) -> None:
+    """Доливает OCR-метаданные в уже найденную work."""
+    if not item.has_dossier_meta and not item.author:
+        return
+    await enrich_work(
+        session,
+        work,
+        fandom=item.fandom,
+        pairing=item.pairing,
+        status=item.status,
+        word_count=item.word_count,
+        tags=item.tags,
+        extra_titles=[item.title],
+    )
+    if item.author and not work.author:
+        work.author = item.author
+
+
 async def resolve_extracted(
     session: AsyncSession,
     user_id: int,
@@ -282,21 +316,26 @@ async def resolve_extracted(
         match = await find_matches(session, item.title, item.author)
         resolved = ResolvedItem(extracted=item, match_confidence=match.confidence)
 
+        # OCR-карточка с досье: medium fuzzy к «похожей» заглушке (Моя≠Его) не берём
+        skip_medium = item.from_ocr_dossier and item.has_dossier_meta
+
         if match.confidence == "high" and match.best:
             work = match.best.work
             if work.id in seen_work_ids:
                 logger.info("Пропуск дубля в пакете work_id=%s", work.id)
                 continue
             seen_work_ids.add(work.id)
+            await _apply_extracted_dossier(session, work, item)
             resolved.work = work
             resolved.library_item = await library_service.get_library_item(
                 session, user_id, work.id
             )
-        elif match.confidence == "medium" and match.candidates:
+        elif match.confidence == "medium" and match.candidates and not skip_medium:
             resolved.needs_user_choice = True
             resolved.candidate_work_ids = [c.work.id for c in match.candidates[:3]]
             if match.best:
                 resolved.work = match.best.work
+                await _apply_extracted_dossier(session, match.best.work, item)
         else:
             # Новое для каталога — сначала platform enrich, потом stub
             title_ok = _is_valid_title(item.title)

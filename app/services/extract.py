@@ -184,20 +184,16 @@ def is_junk_title(title: str) -> bool:
 def is_social_handle(author: str | None) -> bool:
     """True, если author похож на Instagram/TikTok username, а не на имя автора фика.
 
-    Не трогаем обычные ники авторов (SenLinYu): только @handle, snake_case / dots.
+    Только явный @handle. Ники вроде Mary_Cherry / SenLinYu на Ficbook не трогаем.
     """
     if not author:
         return False
     cleaned = author.strip()
+    if not cleaned.startswith("@"):
+        return False
     if " " in cleaned:
         return False
-    if any("\u0400" <= ch <= "\u04FF" for ch in cleaned):
-        return False
-    if cleaned.startswith("@"):
-        return True
-    if "_" in cleaned or "." in cleaned:
-        return bool(_HANDLE_AUTHOR_RE.match(cleaned.lstrip("@")))
-    return False
+    return bool(_HANDLE_AUTHOR_RE.match(cleaned.lstrip("@")))
 
 
 def _is_valid_title(title: str) -> bool:
@@ -481,6 +477,39 @@ def parse_ficbook_ocr_dossiers(ocr_text: str) -> list[ExtractedWork]:
     return results
 
 
+def _titles_near_duplicate(a: str, b: str, *, threshold: float = 88.0) -> bool:
+    """«Чертя/Черти», «Его/Моя маленькая пташка» — достаточно близко для merge."""
+    from rapidfuzz import fuzz
+
+    na, nb = normalize_loose(a), normalize_loose(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    return float(fuzz.token_set_ratio(na, nb)) >= threshold and float(
+        fuzz.partial_ratio(na, nb)
+    ) >= threshold
+
+
+def _merge_meta_into(existing: ExtractedWork, item: ExtractedWork, *, prefer_dossier: bool) -> None:
+    if item.author and (not existing.author or prefer_dossier):
+        if prefer_dossier or not existing.author:
+            existing.author = item.author or existing.author
+    if item.fandom and (prefer_dossier or not existing.fandom):
+        existing.fandom = item.fandom
+    if item.pairing and (prefer_dossier or not existing.pairing):
+        existing.pairing = item.pairing
+    if item.word_count and (prefer_dossier or not existing.word_count):
+        existing.word_count = item.word_count
+    if item.status and (prefer_dossier or not existing.status):
+        existing.status = item.status
+    if item.tags and (prefer_dossier or not existing.tags):
+        existing.tags = item.tags
+    if item.from_ocr_dossier:
+        existing.from_ocr_dossier = True
+    existing.confidence = max(existing.confidence, item.confidence)
+
+
 def merge_extracted_with_dossiers(
     llm_works: list[ExtractedWork],
     dossiers: list[ExtractedWork],
@@ -488,44 +517,52 @@ def merge_extracted_with_dossiers(
     """Досье OCR — источник метаданных; LLM дополняет пропущенные названия."""
     if not dossiers:
         return llm_works
-    by_title: dict[str, ExtractedWork] = {}
-    order: list[str] = []
 
-    def _put(item: ExtractedWork, *, prefer_meta: bool) -> None:
-        key = normalize_loose(item.title)
-        if not key:
-            return
-        if key not in by_title:
-            by_title[key] = item
-            order.append(key)
-            return
-        existing = by_title[key]
-        if prefer_meta or item.from_ocr_dossier:
-            if item.author and not existing.author:
-                existing.author = item.author
-            if item.fandom:
-                existing.fandom = item.fandom
-            if item.pairing:
-                existing.pairing = item.pairing
-            if item.word_count:
-                existing.word_count = item.word_count
-            if item.status:
-                existing.status = item.status
-            if item.tags:
-                existing.tags = item.tags
-            if item.from_ocr_dossier:
-                existing.from_ocr_dossier = True
-                existing.confidence = max(existing.confidence, item.confidence)
-        else:
-            if item.author and not existing.author:
-                existing.author = item.author
-            existing.confidence = max(existing.confidence, item.confidence)
+    merged: list[ExtractedWork] = []
+
+    def _find_near(title: str) -> ExtractedWork | None:
+        for existing in merged:
+            if _titles_near_duplicate(existing.title, title):
+                return existing
+        return None
 
     for d in dossiers:
-        _put(d, prefer_meta=True)
+        hit = _find_near(d.title)
+        if hit is None:
+            merged.append(d)
+        else:
+            _merge_meta_into(hit, d, prefer_dossier=True)
+            # Каноническое название — с карточки OCR
+            if d.from_ocr_dossier:
+                hit.title = d.title
+
     for w in llm_works:
-        _put(w, prefer_meta=False)
-    return [by_title[k] for k in order]
+        hit = _find_near(w.title)
+        if hit is None:
+            # Caption «Моя …» при OCR «Его …» — не плодим дубль без досье
+            if not w.from_ocr_dossier and not w.has_dossier_meta:
+                near_dossier = next(
+                    (
+                        m
+                        for m in merged
+                        if m.from_ocr_dossier and _titles_near_duplicate(m.title, w.title)
+                    ),
+                    None,
+                )
+                if near_dossier is not None:
+                    logger.info(
+                        "Пропуск caption/LLM дубля «%s» — рядом OCR «%s»",
+                        w.title,
+                        near_dossier.title,
+                    )
+                    if w.author and not near_dossier.author:
+                        near_dossier.author = w.author
+                    continue
+            merged.append(w)
+        else:
+            _merge_meta_into(hit, w, prefer_dossier=False)
+
+    return merged
 
 
 async def extract_works_with_llm(

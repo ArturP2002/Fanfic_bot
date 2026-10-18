@@ -187,7 +187,7 @@ def format_batch_list_from_payload(payload: dict[str, Any]) -> str:
             lines.append("   выбери вариант из поиска AO3/Ficbook")
         elif item.get("work_id") or item.get("needs_catalog_confirm"):
             lines.append(
-                "   пока только название; метаданные появятся после обогащения / ссылки"
+                "   пока только название — пришли ссылку AO3/Ficbook, если знаешь"
             )
     return "\n".join(lines)
 

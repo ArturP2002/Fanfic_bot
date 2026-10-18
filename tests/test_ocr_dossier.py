@@ -72,3 +72,18 @@ def test_merge_adds_missed_dossier_title():
     assert "Чертя его омута" in titles
     bird = next(w for w in merged if w.title == "Его маленькая пташка")
     assert bird.word_count == 83458
+
+
+def test_merge_drops_caption_near_duplicate_and_ocr_typo():
+    dossiers = parse_ficbook_ocr_dossiers(SAMPLE_OCR)
+    llm = [
+        ExtractedWork(title="Моя маленькая пташка", author=None, confidence=0.9),
+        ExtractedWork(title="Черти его омута", author="kookieblackpic", confidence=0.9),
+    ]
+    merged = merge_extracted_with_dossiers(llm, dossiers)
+    titles = [w.title for w in merged]
+    assert "Моя маленькая пташка" not in titles
+    assert "Его маленькая пташка" in titles
+    # OCR-канон, не опечатка LLM
+    assert "Чертя его омута" in titles
+    assert "Черти его омута" not in titles
