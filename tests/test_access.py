@@ -74,3 +74,18 @@ def test_admin_bypass(monkeypatch):
     result = check_processing_access(user, 42)
     assert result.allowed
     assert result.reason == "admin"
+
+
+def test_status_shows_subscription_until_for_admin(monkeypatch):
+    from app.services.access import subscription_status_text
+
+    monkeypatch.setattr(
+        "app.services.access.get_settings",
+        lambda: _settings(admin_ids={100}, free_trial_uses=3),
+    )
+    until = datetime.now(timezone.utc) + timedelta(days=100)
+    user = _user(subscription_until=until)
+    text = subscription_status_text(user, 100)
+    assert "Подписка активна до" in text
+    assert "Осталось дней:" in text
+    assert until.strftime("%d.%m.%Y") in text

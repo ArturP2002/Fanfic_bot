@@ -27,6 +27,7 @@ def subscribe_keyboard(
     payment_id: int | None = None,
     confirmation_url: str | None = None,
     demo: bool = False,
+    has_subscription: bool = False,
 ) -> InlineKeyboardMarkup:
     """Клавиатура экрана подписки."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -43,11 +44,11 @@ def subscribe_keyboard(
                 )
             ]
         )
-        if demo and not confirmation_url:
-            # Подсказка в тексте сообщения; кнопка одна — проверка = успех демо
-            pass
     else:
-        pay_label = "Оплатить (демо)" if demo else "Оплатить"
+        if has_subscription:
+            pay_label = "Продлить (демо)" if demo else "Продлить"
+        else:
+            pay_label = "Оплатить (демо)" if demo else "Оплатить"
         rows.append(
             [InlineKeyboardButton(text=pay_label, callback_data="pay:create")]
         )

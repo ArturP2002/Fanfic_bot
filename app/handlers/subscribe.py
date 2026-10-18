@@ -26,24 +26,35 @@ router = Router()
 async def _intro_text(session, user, telegram_id: int) -> str:
     settings = get_settings()
     base = settings.subscription_price_rub
+    active = access_service.has_active_subscription(user)
     promo = await promo_service.get_user_promo(session, user)
+
     if promo and promo.discount_percent:
         final = promo_service.price_with_discount(base, promo.discount_percent)
         price_block = (
-            f"Цена: {final:.0f} ₽ "
+            f"Продление / цена: {final:.0f} ₽ "
             f"(вместо {base} ₽, скидка {promo.discount_percent}%)"
+            if active
+            else f"Цена: {final:.0f} ₽ (вместо {base} ₽, скидка {promo.discount_percent}%)"
         )
         promo_block = f"\nПромокод: {promo.code}"
     elif user.promo_code:
-        price_block = f"Цена: {base} ₽ / год"
+        price_block = (
+            f"Продление: {base} ₽ / год" if active else f"Цена: {base} ₽ / год"
+        )
         promo_block = f"\nПромокод: {user.promo_code}"
     else:
-        price_block = f"Цена: {base} ₽ / год"
+        price_block = (
+            f"Продление: {base} ₽ / год" if active else f"Цена: {base} ₽ / год"
+        )
         promo_block = ""
 
     status = access_service.subscription_status_text(user, telegram_id)
 
-    if payments_service.is_demo_payment_mode():
+    # Длинную демо-подсказку не дублируем, если подписка уже есть
+    if active:
+        mode_block = ""
+    elif payments_service.is_demo_payment_mode():
         mode_block = texts.SUBSCRIBE_DEMO_HINT
     elif settings.yookassa_test_mode:
         mode_block = texts.SUBSCRIBE_TEST_HINT
@@ -74,9 +85,10 @@ async def show_subscribe(message: Message, state: FSMContext) -> None:
         await session.commit()
         text = await _intro_text(session, user, message.from_user.id)
         demo = payments_service.is_demo_payment_mode()
+        has_sub = access_service.has_active_subscription(user)
     await message.answer(
         text,
-        reply_markup=subscribe_keyboard(demo=demo),
+        reply_markup=subscribe_keyboard(demo=demo, has_subscription=has_sub),
     )
 
 
@@ -210,13 +222,14 @@ async def save_promo_on_subscribe(message: Message, state: FSMContext) -> None:
             force=True,
         )
         demo = payments_service.is_demo_payment_mode()
+        has_sub = access_service.has_active_subscription(user)
 
     await state.clear()
     if ok:
         await message.answer(msg)
         await message.answer(
-            "Теперь можно нажать «Оплатить».",
-            reply_markup=subscribe_keyboard(demo=demo),
+            "Теперь можно нажать «Оплатить» или «Продлить».",
+            reply_markup=subscribe_keyboard(demo=demo, has_subscription=has_sub),
         )
     else:
         await message.answer(msg or texts.PROMO_INVALID)

@@ -114,14 +114,26 @@ async def consume_trial_use(session: AsyncSession, user: User) -> int:
 def subscription_status_text(user: User, telegram_id: int) -> str:
     """Текст статуса подписки для UI."""
     settings = get_settings()
-    if telegram_id in settings.admin_ids:
-        return "У тебя полный доступ (админ)."
+    is_admin = telegram_id in settings.admin_ids
 
     if has_active_subscription(user):
         until = user.subscription_until
         assert until is not None
-        local = until.astimezone(timezone.utc).strftime("%d.%m.%Y")
-        return f"Подписка активна до {local}."
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        now = _utcnow()
+        days_left = max(0, (until.date() - now.date()).days)
+        until_str = until.strftime("%d.%m.%Y")
+        lines = [
+            f"Подписка активна до {until_str}.",
+            f"Осталось дней: {days_left}.",
+        ]
+        if is_admin:
+            lines.append("Также есть полный доступ админа.")
+        return "\n".join(lines)
+
+    if is_admin:
+        return "Подписки нет, но у тебя полный доступ (админ)."
 
     ensure_free_uses_initialized(user)
     if settings.free_trial_uses <= 0:
