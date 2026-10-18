@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import BigInteger, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -21,7 +21,15 @@ class User(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+    subscription_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # None = ещё не инициализирован (при первом гейте = FREE_TRIAL_USES)
+    free_uses_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    promo_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     library_items = relationship("LibraryItem", back_populates="user")
     sources = relationship("Source", back_populates="user")
     error_reports = relationship("ErrorReport", back_populates="user")
+    payments = relationship("Payment", back_populates="user")

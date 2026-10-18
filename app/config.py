@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +47,36 @@ class Settings(BaseSettings):
 
     # Исходящий SOCKS5 (VPS в РФ): socks5h://user:pass@host:1080
     socks5_proxy: str = Field(default="", alias="SOCKS5_PROXY")
+
+    # ЮKassa / подписка
+    yookassa_shop_id: str = Field(default="", alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: str = Field(default="", alias="YOOKASSA_SECRET_KEY")
+    yookassa_test_mode: bool = Field(default=True, alias="YOOKASSA_TEST_MODE")
+    subscription_price_rub: int = Field(default=299, alias="SUBSCRIPTION_PRICE_RUB")
+    subscription_period_days: int = Field(default=365, alias="SUBSCRIPTION_PERIOD_DAYS")
+    free_trial_uses: int = Field(default=3, alias="FREE_TRIAL_USES")
+
+    # Google Sheets (опционально)
+    google_service_account_json: str = Field(
+        default="",
+        alias="GOOGLE_SERVICE_ACCOUNT_JSON",
+    )
+    google_sheets_spreadsheet_id: str = Field(
+        default="",
+        alias="GOOGLE_SHEETS_SPREADSHEET_ID",
+    )
+
+    # Поиск AO3/Ficbook после extract
+    platform_search_budget: int = Field(default=15, alias="PLATFORM_SEARCH_BUDGET")
+
+    @field_validator("yookassa_test_mode", mode="before")
+    @classmethod
+    def _parse_bool(cls, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return True
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     @property
     def admin_ids(self) -> set[int]:

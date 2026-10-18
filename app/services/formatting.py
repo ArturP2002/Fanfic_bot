@@ -94,11 +94,20 @@ def format_batch_summary(batch: ResolutionBatch) -> str:
         lines.append(f"☑ {read} уже прочитан")
     if other:
         lines.append(f"📖/💀 {other} уже в библиотеке с другим статусом")
-    pending = [i for i in batch.items if i.needs_user_choice]
+    pending = [
+        i
+        for i in batch.items
+        if (i.needs_user_choice and i.candidate_work_ids) or i.platform_hits
+    ]
     if pending:
         lines.append(f"❓ {len(pending)} требуют уточнения")
     needs_confirm = [
-        i for i in batch.items if i.needs_catalog_confirm and not i.work and not i.needs_user_choice
+        i
+        for i in batch.items
+        if i.needs_catalog_confirm
+        and not i.work
+        and not i.needs_user_choice
+        and not i.platform_hits
     ]
     if needs_confirm:
         lines.append(f"❔ {len(needs_confirm)} нужно подтверждение")
@@ -114,7 +123,9 @@ def format_batch_list(batch: ResolutionBatch) -> str:
         head = f"{idx}. {title}"
         if author:
             head += f" — {author}"
-        if item.needs_user_choice:
+        if item.platform_hits and not item.work:
+            head += "\n   ❓ есть варианты на площадках"
+        elif item.needs_user_choice:
             head += "\n   ❓ нужно уточнить"
         elif item.library_item:
             head += f"\n   {status_emoji_line(item.library_item.reading_status)}"
@@ -127,6 +138,8 @@ def format_batch_list(batch: ResolutionBatch) -> str:
         lines.append(head)
         if item.work and work_has_rich_meta(item.work):
             lines.extend(brief_meta_lines(item.work))
+        elif item.platform_hits and not item.work:
+            lines.append("   выбери вариант из поиска AO3/Ficbook")
         elif item.work or item.needs_catalog_confirm:
             lines.append("   пока только название; метаданные появятся после обогащения / ссылки")
     return "\n".join(lines)
@@ -146,6 +159,8 @@ def format_batch_list_from_payload(payload: dict[str, Any]) -> str:
             head += "\n   ☑ уже прочитан"
         elif status == ReadingStatus.WANT.value:
             head += "\n   🔖 уже хочешь прочитать"
+        elif item.get("platform_hits") and not item.get("work_id"):
+            head += "\n   ❓ есть варианты на площадках"
         elif item.get("needs_user_choice"):
             head += "\n   ❓ нужно уточнить"
         elif item.get("work_id") and not status:
@@ -166,6 +181,8 @@ def format_batch_list_from_payload(payload: dict[str, Any]) -> str:
                 },
             )()
             lines.extend(brief_meta_lines(stub))
+        elif item.get("platform_hits") and not item.get("work_id"):
+            lines.append("   выбери вариант из поиска AO3/Ficbook")
         elif item.get("work_id") or item.get("needs_catalog_confirm"):
             lines.append(
                 "   пока только название; метаданные появятся после обогащения / ссылки"

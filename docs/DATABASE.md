@@ -1,7 +1,15 @@
 # Структура базы данных FicBrain
 
 ## users
-Пользователи Telegram. Поля: `id`, `telegram_id`, `username`, `first_name`, `created_at`.
+Пользователи Telegram. Поля: `id`, `telegram_id`, `username`, `first_name`, `created_at`,
+`subscription_until`, `free_uses_left`, `promo_code`.
+
+## payments
+Платежи ЮKassa: `user_id`, `yookassa_payment_id`, `amount`, `currency`, `status`,
+`is_test`, `promo_code`, `confirmation_url`, `created_at`, `paid_at`.
+
+## promo_codes
+Промокоды блогеров: `code`, `blogger_name`, `is_active`, `created_by_telegram_id`, `created_at`.
 
 ## works
 Общая база произведений (одна карточка на фанфик для всех пользователей).

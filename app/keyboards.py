@@ -16,10 +16,73 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📚 Моя библиотека")],
-            [KeyboardButton(text="ℹ️ Как это работает")],
+            [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="ℹ️ Как это работает")],
         ],
         resize_keyboard=True,
     )
+
+
+def subscribe_keyboard(
+    *,
+    payment_id: int | None = None,
+    confirmation_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Клавиатура экрана подписки."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if confirmation_url and payment_id is not None:
+        rows.append(
+            [InlineKeyboardButton(text="Оплатить в ЮKassa", url=confirmation_url)]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Проверить оплату",
+                    callback_data=f"pay:check:{payment_id}",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [InlineKeyboardButton(text="Оплатить", callback_data="pay:create")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="Есть промокод", callback_data="pay:promo")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def choose_platform_hit_keyboard(
+    token: str, index: int, hits: list
+) -> InlineKeyboardMarkup:
+    """Выбор кандидата с площадки (AO3/Ficbook) по URL."""
+    rows = []
+    for hit_idx, hit in enumerate(hits[:5]):
+        label = hit.title if hasattr(hit, "title") else hit.get("title", "?")
+        author = hit.author if hasattr(hit, "author") else hit.get("author")
+        platform = hit.platform if hasattr(hit, "platform") else hit.get("platform", "")
+        if author:
+            label = f"{label} — {author}"
+        if platform:
+            label = f"[{platform}] {label}"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"phit:pick:{token}:{index}:{hit_idx}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Ничего из этого",
+                callback_data=f"phit:none:{token}:{index}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def library_overview(counts: dict[str, int]) -> InlineKeyboardMarkup:

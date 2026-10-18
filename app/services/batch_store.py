@@ -69,6 +69,17 @@ def batch_from_resolution(user_id: int, batch) -> dict[str, Any]:
     for item in batch.items:
         title = (item.work.title if item.work else None) or item.extracted.title
         author = (item.work.author if item.work else None) or item.extracted.author
+        hits = []
+        for hit in getattr(item, "platform_hits", None) or []:
+            hits.append(
+                {
+                    "title": hit.title,
+                    "author": hit.author,
+                    "url": hit.url,
+                    "platform": hit.platform,
+                    "score": getattr(hit, "score", 0.0),
+                }
+            )
         row = {
             "title": title,
             "author": author,
@@ -80,6 +91,7 @@ def batch_from_resolution(user_id: int, batch) -> dict[str, Any]:
             "candidate_work_ids": item.candidate_work_ids,
             "is_new_for_catalog": item.is_new_for_catalog,
             "needs_catalog_confirm": item.needs_catalog_confirm,
+            "platform_hits": hits,
         }
         row.update(work_meta_snapshot(item.work))
         items.append(row)

@@ -18,12 +18,21 @@ logger = logging.getLogger(__name__)
 
 HIGH_SCORE = 92
 MEDIUM_SCORE = 78
-_MAX_SEARCHES_PER_BATCH = 5
+_MAX_SEARCHES_PER_BATCH_DEFAULT = 15
 # Поиск не должен съедать весь ARQ job_timeout после долгого скачивания рилса
 _SEARCH_HTTP_TIMEOUT = 12.0
 _SEARCH_HTTP_ATTEMPTS = 2
 _ENRICH_PER_TITLE_TIMEOUT = 35.0
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+
+
+def _max_searches_per_batch() -> int:
+    from app.config import get_settings
+
+    try:
+        return max(1, int(get_settings().platform_search_budget))
+    except Exception:
+        return _MAX_SEARCHES_PER_BATCH_DEFAULT
 
 
 @dataclass
@@ -201,10 +210,18 @@ async def _search_one_platform(
         )
         return hits
     except Exception as exc:
+        err = str(exc)
+        hint = ""
+        lower = err.lower()
+        if "403" in lower or "forbidden" in lower:
+            hint = " (возможен блок площадки / нужен SOCKS5_PROXY)"
+        elif "timeout" in lower or "timed out" in lower:
+            hint = " (таймаут)"
         logger.warning(
-            "Поиск %s для «%s» не удался: %s",
+            "Поиск %s для «%s» не удался%s: %s",
             platform,
             title,
+            hint,
             exc,
         )
         return []
@@ -283,8 +300,8 @@ async def enrich_from_platforms(
 class SearchBudget:
     """Лимит внешних поисков на один batch resolve."""
 
-    def __init__(self, limit: int = _MAX_SEARCHES_PER_BATCH) -> None:
-        self.remaining = limit
+    def __init__(self, limit: int | None = None) -> None:
+        self.remaining = limit if limit is not None else _max_searches_per_batch()
 
     def take(self) -> bool:
         if self.remaining <= 0:

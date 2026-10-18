@@ -113,18 +113,29 @@ docker compose exec bot python -m app.cli import-works data/templates/works_temp
 | OpenAI | Whisper + Vision OCR + извлечение названий |
 | Apify | скачивание IG/TikTok |
 | PostgreSQL / Redis | данные и очередь |
+| ЮKassa | годовая подписка |
+| Google Sheets | промокоды блогеров и атрибуции |
 
-Все ключи задаются через переменные окружения, не в коде.
+Все ключи задаются через переменные окружения, не в коде. Подробнее: [docs/SERVICES.md](docs/SERVICES.md).
+
+После обновления схемы:
+
+```bash
+alembic upgrade head
+# или: python -m app.cli init-db  (create_all для локального старта)
+```
 
 ## Документация
 
 - [Ограничения](docs/LIMITATIONS.md)
 - [Схема БД](docs/DATABASE.md)
+- [Сервисы и стоимость ИИ](docs/SERVICES.md)
 
 ## Смена настроек
 
 Основные параметры — в `.env` (см. `.env.example`): токен бота, БД, Redis, ключи API,
-лимит кадров, язык Whisper, id админов, `SOCKS5_PROXY` для VPS в РФ.
+лимит кадров, язык Whisper, id админов, `SOCKS5_PROXY`, ЮKassa (`YOOKASSA_*`,
+`SUBSCRIPTION_PRICE_RUB`, `FREE_TRIAL_USES`), Google Sheets, `PLATFORM_SEARCH_BUDGET`.
 
 ## Язык в коде
 

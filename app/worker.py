@@ -20,6 +20,7 @@ from app.db.session import async_session_factory
 from app.keyboards import (
     batch_result_keyboard,
     choose_candidate_keyboard,
+    choose_platform_hit_keyboard,
     confirm_match_keyboard,
     single_add_keyboard,
 )
@@ -168,6 +169,13 @@ async def _finish_with_batch(
                     "Какой ты имела в виду?",
                     choose_candidate_keyboard(token, idx, works),
                 )
+            elif item.platform_hits and not item.work:
+                await _notify(
+                    job.telegram_chat_id,
+                    f"Нашла похожие работы на площадках для «{item.extracted.title}». "
+                    "Какую выбрать?",
+                    choose_platform_hit_keyboard(token, idx, item.platform_hits),
+                )
             elif item.needs_catalog_confirm and item.work:
                 await _notify(
                     job.telegram_chat_id,
@@ -182,6 +190,7 @@ async def _finish_with_batch(
             and batch.items[0].work
             and not batch.items[0].needs_user_choice
             and not batch.items[0].needs_catalog_confirm
+            and not batch.items[0].platform_hits
         ):
             item = batch.items[0]
             if item.library_item:

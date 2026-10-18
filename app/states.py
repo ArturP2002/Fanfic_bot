@@ -20,3 +20,16 @@ class ErrorStates(StatesGroup):
     """Сообщение об ошибке."""
 
     waiting_description = State()
+
+
+class SubscribeStates(StatesGroup):
+    """Ввод промокода при оплате."""
+
+    waiting_promo = State()
+
+
+class AdminBloggerStates(StatesGroup):
+    """Создание промокода блогера."""
+
+    waiting_name = State()
+    waiting_code = State()

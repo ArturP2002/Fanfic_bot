@@ -12,7 +12,7 @@ from app.models.enums import ConfirmationStatus, ReadingStatus
 from app.services import library as library_service
 from app.services.extract import ExtractedWork, _is_valid_title
 from app.services.matching import find_matches
-from app.services.platform_search import SearchBudget, enrich_from_platforms
+from app.services.platform_search import SearchBudget, SearchHit, enrich_from_platforms
 from app.services.works import (
     create_work,
     enrich_work,
@@ -39,6 +39,8 @@ class ResolvedItem:
     candidate_work_ids: list[int] = field(default_factory=list)
     is_new_for_catalog: bool = False
     needs_catalog_confirm: bool = False
+    # Кандидаты с AO3/Ficbook (medium), для UI выбора
+    platform_hits: list[SearchHit] = field(default_factory=list)
 
     @property
     def is_new_for_user(self) -> bool:
@@ -91,11 +93,15 @@ async def _create_from_platform_enrichment(
     item: ExtractedWork,
     *,
     search_budget: SearchBudget,
-) -> tuple[Work | None, str, bool]:
-    """Пробует AO3/Ficbook. Возвращает (work|None, match_confidence, needs_confirm)."""
+) -> tuple[Work | None, str, bool, list[SearchHit]]:
+    """Пробует AO3/Ficbook.
+
+    Returns:
+        (work|None, match_confidence, needs_confirm, platform_hits)
+    """
     if not search_budget.take():
         logger.info("Лимит внешних поисков исчерпан — без enrich для «%s»", item.title)
-        return None, "none", True
+        return None, "none", True, []
 
     try:
         result = await enrich_from_platforms(item.title, item.author)
@@ -104,7 +110,9 @@ async def _create_from_platform_enrichment(
             "Enrich неожиданно упал для «%s» — stub без досье",
             item.title,
         )
-        return None, "none", True
+        return None, "none", True, []
+
+    hits = list(result.hits or [])
 
     if result.confidence == "high" and result.parsed:
         parsed = result.parsed
@@ -128,7 +136,7 @@ async def _create_from_platform_enrichment(
                 existing.id,
                 existing.title,
             )
-            return existing, "high", False
+            return existing, "high", False, hits
 
         author_ok = bool(parsed.author) and (
             not item.author
@@ -162,17 +170,25 @@ async def _create_from_platform_enrichment(
             parsed.platform,
             needs_confirm,
         )
-        return work, "high", needs_confirm
+        return work, "high", needs_confirm, hits
 
-    if result.confidence == "medium":
+    if result.confidence == "medium" and hits:
         logger.info(
-            "Enrich medium для «%s»: hits=%s — нужна ручная проверка",
+            "Enrich medium для «%s»: hits=%s — предлагаем выбор пользователю",
             item.title,
-            len(result.hits or []),
+            len(hits),
         )
-        return None, "medium", True
+        return None, "medium", True, hits[:5]
 
-    return None, "none", True
+    if hits:
+        logger.info(
+            "Enrich none/low для «%s», но есть hits=%s — предлагаем выбор",
+            item.title,
+            len(hits),
+        )
+        return None, "none", True, hits[:5]
+
+    return None, "none", True, []
 
 
 def normalize_authors_close(a: str, b: str) -> bool:
@@ -226,11 +242,13 @@ async def resolve_extracted(
             enriched_work = None
             enrich_conf = "none"
             needs_confirm = True
+            platform_hits: list[SearchHit] = []
             if platform_enrich and can_create and title_ok:
                 (
                     enriched_work,
                     enrich_conf,
                     needs_confirm,
+                    platform_hits,
                 ) = await _create_from_platform_enrichment(
                     session, item, search_budget=search_budget
                 )
@@ -246,6 +264,17 @@ async def resolve_extracted(
                 resolved.needs_catalog_confirm = needs_confirm
                 resolved.library_item = await library_service.get_library_item(
                     session, user_id, enriched_work.id
+                )
+            elif platform_hits:
+                # Не создаём пустой stub — сразу UI выбора с площадки
+                resolved.match_confidence = enrich_conf
+                resolved.platform_hits = platform_hits
+                resolved.needs_user_choice = True
+                resolved.needs_catalog_confirm = True
+                logger.info(
+                    "Platform hits для «%s»: %s вариантов без stub",
+                    item.title,
+                    len(platform_hits),
                 )
             elif can_create and title_ok:
                 work = await create_work(

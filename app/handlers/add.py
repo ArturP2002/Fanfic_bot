@@ -20,12 +20,15 @@ from app.db.session import async_session_factory
 from app.keyboards import (
     batch_result_keyboard,
     choose_candidate_keyboard,
+    choose_platform_hit_keyboard,
     confirm_match_keyboard,
     main_menu,
     single_add_keyboard,
+    subscribe_keyboard,
 )
 from app.models import ProcessingJob
-from app.models.enums import JobStatus, JobType, ReadingStatus, SourceType
+from app.models.enums import ConfirmationStatus, JobStatus, JobType, ReadingStatus, SourceType
+from app.services import access as access_service
 from app.services import library as library_service
 from app.services.batch_store import batch_from_resolution, load_batch, save_batch
 from app.services.extract import ExtractedWork, extract_works_with_llm, is_short_catalog_query
@@ -41,13 +44,58 @@ from app.services.parsers import detect_platform, parse_fic_url
 from app.services.resolution import resolve_extracted, resolve_parsed_link
 from app.services.users import get_or_create_user
 from app.services.works import confirm_work, create_work, get_work
-from app.models.enums import ConfirmationStatus
 from app.states import AddStates
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 URL_RE = re.compile(r"https?://\S+", re.I)
+
+
+async def _ensure_processing_allowed(message: Message) -> bool:
+    """Проверяет подписку/пробные использования. При отказе шлёт paywall."""
+    async with async_session_factory() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        result = access_service.check_processing_access(user, message.from_user.id)
+        if result.consume_trial and result.allowed:
+            # Инициализация free_uses_left могла измениться
+            await session.commit()
+        elif not result.allowed:
+            await session.commit()
+            await message.answer(
+                result.message or texts.SUBSCRIBE_INTRO.format(
+                    price=get_settings().subscription_price_rub,
+                    status="",
+                    mode_hint="",
+                ),
+                reply_markup=subscribe_keyboard(),
+            )
+            return False
+        else:
+            await session.commit()
+        return True
+
+
+async def _consume_trial_after_enqueue(telegram_id: int) -> None:
+    """Списывает пробное использование после успешной постановки job."""
+    async with async_session_factory() as session:
+        user = await get_or_create_user(session, telegram_id=telegram_id)
+        result = access_service.check_processing_access(user, telegram_id)
+        if result.consume_trial:
+            left = await access_service.consume_trial_use(session, user)
+            logger.info(
+                "Trial списан telegram_id=%s осталось=%s",
+                telegram_id,
+                left,
+            )
+        else:
+            # сохранить возможную инициализацию free_uses_left
+            await session.commit()
 
 
 def _redis_settings() -> RedisSettings:
@@ -111,6 +159,9 @@ async def on_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         return
 
     # Одиночный скрин — разбираем сразу
+    if not await _ensure_processing_allowed(message):
+        await state.clear()
+        return
     await message.answer(texts.ANALYZING_SCREENSHOTS)
     await _process_photos(message, state, bot, photos)
 
@@ -122,6 +173,9 @@ async def photos_done(message: Message, state: FSMContext, bot: Bot) -> None:
     photos = data.get("photos") or []
     if not photos:
         await message.answer("Скриншотов пока нет. Пришли изображения.")
+        return
+    if not await _ensure_processing_allowed(message):
+        await state.clear()
         return
     await message.answer(texts.ANALYZING_SCREENSHOTS)
     await _process_photos(message, state, bot, photos)
@@ -160,6 +214,7 @@ async def _process_photos(
 
     await state.clear()
     await _enqueue_job("process_screenshots", job_id=job_id)
+    await _consume_trial_after_enqueue(message.from_user.id)
 
 
 @router.message(F.video)
@@ -179,6 +234,8 @@ async def on_video_file(message: Message, state: FSMContext, bot: Bot) -> None:
     else:
         return
 
+    if not await _ensure_processing_allowed(message):
+        return
     await message.answer(texts.ANALYZING_VIDEO)
     settings = get_settings()
     tmp = Path(settings.tmp_dir) / f"video_{message.from_user.id}"
@@ -203,6 +260,7 @@ async def on_video_file(message: Message, state: FSMContext, bot: Bot) -> None:
 
     await state.clear()
     await _enqueue_job("process_video_file", job_id=job_id)
+    await _consume_trial_after_enqueue(message.from_user.id)
 
 
 @router.message(F.text)
@@ -213,6 +271,7 @@ async def on_text(message: Message, state: FSMContext) -> None:
         "➕ Добавить",
         "📚 Моя библиотека",
         "ℹ️ Как это работает",
+        "💎 Подписка",
     }:
         return
 
@@ -220,7 +279,13 @@ async def on_text(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     if current and any(
         name in current
-        for name in ("LibraryStates", "ErrorStates", "collecting_photos")
+        for name in (
+            "LibraryStates",
+            "ErrorStates",
+            "SubscribeStates",
+            "AdminBloggerStates",
+            "collecting_photos",
+        )
     ):
         raise SkipHandler()
 
@@ -239,6 +304,8 @@ async def on_text(message: Message, state: FSMContext) -> None:
         return
 
     if video_url:
+        if not await _ensure_processing_allowed(message):
+            return
         await message.answer(texts.ANALYZING_VIDEO)
         async with async_session_factory() as session:
             user = await get_or_create_user(session, telegram_id=message.from_user.id)
@@ -255,6 +322,7 @@ async def on_text(message: Message, state: FSMContext) -> None:
             job_id = job.id
         await state.clear()
         await _enqueue_job("process_video_url", job_id=job_id)
+        await _consume_trial_after_enqueue(message.from_user.id)
         return
 
     if fic_url:
@@ -263,8 +331,10 @@ async def on_text(message: Message, state: FSMContext) -> None:
         return
 
     await message.answer(texts.ANALYZING_TEXT)
-    await _handle_text_extract(message, text)
+    used_paid = await _handle_text_extract(message, text)
     await state.clear()
+    if used_paid:
+        await _consume_trial_after_enqueue(message.from_user.id)
 
 
 async def _handle_fic_link(message: Message, url: str) -> None:
@@ -318,12 +388,14 @@ async def _handle_fic_link(message: Message, url: str) -> None:
         )
 
 
-async def _handle_text_extract(message: Message, text: str) -> None:
+async def _handle_text_extract(message: Message, text: str) -> bool:
     """Извлечение из текста и показ результата.
 
     Короткие запросы (MOAM, Lionheart) сначала сверяем с каталогом — без LLM.
+    Возвращает True, если списали платный/пробный слот (был вызов LLM).
     """
     extracted: list[ExtractedWork] | None = None
+    used_paid = False
     async with async_session_factory() as session:
         user = await get_or_create_user(session, telegram_id=message.from_user.id)
 
@@ -341,10 +413,22 @@ async def _handle_text_extract(message: Message, text: str) -> None:
                 ]
 
         if extracted is None:
+            # LLM — платная операция
+            access = access_service.check_processing_access(
+                user, message.from_user.id
+            )
+            await session.commit()
+            if not access.allowed:
+                await message.answer(
+                    access.message or "Нужна подписка.",
+                    reply_markup=subscribe_keyboard(),
+                )
+                return False
             extracted = await extract_works_with_llm(text)
+            used_paid = True
         if not extracted:
             await message.answer(texts.NOTHING_FOUND)
-            return
+            return used_paid
 
         batch = await resolve_extracted(session, user.id, extracted)
         await library_service.create_source(
@@ -356,7 +440,7 @@ async def _handle_text_extract(message: Message, text: str) -> None:
         )
         token = await save_batch(batch_from_resolution(user.id, batch))
 
-        # Уточнения по medium match
+        # Уточнения по medium match / platform hits
         for idx, item in enumerate(batch.items):
             if item.needs_user_choice and item.candidate_work_ids:
                 works = []
@@ -368,13 +452,26 @@ async def _handle_text_extract(message: Message, text: str) -> None:
                     f"Нашла несколько вариантов для «{item.extracted.title}». Какой ты имела в виду?",
                     reply_markup=choose_candidate_keyboard(token, idx, works),
                 )
+            elif item.platform_hits and not item.work:
+                await message.answer(
+                    f"Нашла похожие работы на площадках для «{item.extracted.title}». "
+                    "Какую выбрать?",
+                    reply_markup=choose_platform_hit_keyboard(
+                        token, idx, item.platform_hits
+                    ),
+                )
             elif item.needs_catalog_confirm and item.work:
                 await message.answer(
                     format_catalog_confirm(item),
                     reply_markup=confirm_match_keyboard(token, idx),
                 )
 
-        if len(batch.items) == 1 and batch.items[0].work and not batch.items[0].needs_user_choice:
+        if (
+            len(batch.items) == 1
+            and batch.items[0].work
+            and not batch.items[0].needs_user_choice
+            and not batch.items[0].platform_hits
+        ):
             item = batch.items[0]
             if item.library_item:
                 status = item.library_item.reading_status
@@ -382,21 +479,21 @@ async def _handle_text_extract(message: Message, text: str) -> None:
                     await message.answer(f"☑ Ты это уже читала.\n\n{item.work.title}")
                 else:
                     await message.answer(texts.ALREADY_IN_LIBRARY)
-                return
+                return used_paid
             if item.needs_catalog_confirm:
-                # confirm уже отправлен выше
-                return
+                return used_paid
             await message.answer(
                 format_single_work(item),
                 reply_markup=single_add_keyboard(item.work.id),
             )
-            return
+            return used_paid
 
         summary = format_batch_summary(batch)
         await message.answer(
             summary,
             reply_markup=batch_result_keyboard(token, len(batch.new_items)),
         )
+        return used_paid
 
 
 @router.callback_query(F.data.startswith("batch:view:"))
@@ -522,5 +619,88 @@ async def match_none(callback: CallbackQuery) -> None:
     """Ни один кандидат не подошёл."""
     await callback.message.answer(
         "Хорошо. Можешь прислать точное название или ссылку на фанфик."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("phit:pick:"))
+async def platform_hit_pick(callback: CallbackQuery) -> None:
+    """Пользователь выбрала кандидата с AO3/Ficbook — парсим страницу и сохраняем."""
+    # phit:pick:{token}:{index}:{hit_idx}
+    parts = callback.data.split(":")
+    if len(parts) < 5:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+    token, index_s, hit_idx_s = parts[2], parts[3], parts[4]
+    index = int(index_s)
+    hit_idx = int(hit_idx_s)
+    payload = await load_batch(token)
+    if not payload:
+        await callback.answer("Сессия устарела", show_alert=True)
+        return
+    try:
+        item = payload["items"][index]
+        hit = item["platform_hits"][hit_idx]
+    except (IndexError, KeyError, TypeError):
+        await callback.answer("Вариант не найден", show_alert=True)
+        return
+
+    url = hit.get("url")
+    if not url:
+        await callback.answer("Нет ссылки", show_alert=True)
+        return
+
+    await callback.answer("Загружаю страницу…")
+    try:
+        parsed = await parse_fic_url(url)
+    except Exception:
+        logger.exception("Не удалось разобрать platform hit %s", url)
+        await callback.message.answer(
+            "Не удалось открыть страницу. Попробуй прислать ссылку вручную."
+        )
+        return
+    if not parsed:
+        await callback.message.answer(
+            "Не удалось прочитать страницу. Пришли ссылку на фанфик текстом."
+        )
+        return
+
+    async with async_session_factory() as session:
+        user = await get_or_create_user(session, telegram_id=callback.from_user.id)
+        resolved = await resolve_parsed_link(
+            session,
+            user.id,
+            title=parsed.title,
+            author=parsed.author,
+            status=parsed.status,
+            word_count=parsed.word_count,
+            tags=parsed.tags,
+            fandom=parsed.fandom,
+            pairing=parsed.pairing,
+            source_url=parsed.source_url,
+            original_url=parsed.original_url,
+        )
+        if resolved.library_item:
+            await callback.message.answer(texts.ALREADY_IN_LIBRARY)
+            return
+        await library_service.create_source(
+            session,
+            user.id,
+            SourceType.FIC_LINK.value,
+            platform=parsed.platform,
+            url=url,
+            work_ids=[resolved.work.id] if resolved.work else [],
+        )
+        await callback.message.answer(
+            format_single_work(resolved),
+            reply_markup=single_add_keyboard(resolved.work.id),
+        )
+
+
+@router.callback_query(F.data.startswith("phit:none:"))
+async def platform_hit_none(callback: CallbackQuery) -> None:
+    """Ни один кандидат с площадки не подошёл."""
+    await callback.message.answer(
+        "Ок. Можешь прислать точную ссылку на фанфик (AO3 / Ficbook / FanFiction.net)."
     )
     await callback.answer()
