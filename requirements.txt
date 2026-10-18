@@ -22,3 +22,6 @@ yt-dlp>=2025.1.15
 yookassa>=3.4.0
 gspread>=6.1.0
 google-auth>=2.36.0
+# gspread/requests через SOCKS5_PROXY (ALL_PROXY)
+requests[socks]>=2.32.0
+PySocks>=1.7.1
