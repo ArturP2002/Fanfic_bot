@@ -95,8 +95,12 @@ async def create_promo(
     code: str | None,
     discount_percent: int = 0,
     created_by_telegram_id: int | None,
-) -> PromoCode:
-    """Создаёт промокод и пишет в Sheets."""
+) -> tuple[PromoCode, str | None]:
+    """Создаёт промокод и пишет в Sheets.
+
+    Returns:
+        (promo, sheets_error_or_None)
+    """
     name = (blogger_name or "").strip()
     if not name:
         raise ValueError("Укажи имя блогера")
@@ -137,6 +141,7 @@ async def create_promo(
     await session.commit()
     await session.refresh(promo)
 
+    sheets_error: str | None = None
     try:
         from app.services import sheets as sheets_service
 
@@ -147,17 +152,19 @@ async def create_promo(
             discount_percent=promo.discount_percent,
             created_at=promo.created_at,
         )
-    except Exception:
-        logger.exception("Не удалось записать промокод в Sheets")
+    except Exception as exc:
+        sheets_error = str(exc)
+        logger.exception("Не удалось записать промокод в Sheets: %s", exc)
 
     logger.info(
-        "Создан промокод %s для «%s» discount=%s%% by=%s",
+        "Создан промокод %s для «%s» discount=%s%% by=%s sheets=%s",
         promo.code,
         promo.blogger_name,
         promo.discount_percent,
         created_by_telegram_id,
+        sheets_error is None,
     )
-    return promo
+    return promo, sheets_error
 
 
 async def attach_promo_to_user(
@@ -218,3 +225,63 @@ async def attach_promo_to_user(
     else:
         msg += f" ({promo.blogger_name})"
     return True, msg
+
+
+async def deactivate_promo(
+    session: AsyncSession, code: str
+) -> tuple[PromoCode, int]:
+    """Деактивирует промокод и снимает его с пользователей.
+
+    Returns:
+        (promo, cleared_users_count)
+    """
+    normalized = normalize_code(code)
+    result = await session.execute(
+        select(PromoCode).where(PromoCode.code == normalized)
+    )
+    promo = result.scalar_one_or_none()
+    if not promo:
+        raise ValueError(f"Промокод {normalized} не найден.")
+    if not promo.is_active:
+        raise ValueError(f"Промокод {normalized} уже неактивен.")
+
+    promo.is_active = False
+    users = await session.execute(
+        select(User).where(User.promo_code == normalized)
+    )
+    cleared = 0
+    for u in users.scalars().all():
+        u.promo_code = None
+        cleared += 1
+    await session.commit()
+    await session.refresh(promo)
+
+    try:
+        from app.services import sheets as sheets_service
+
+        await sheets_service.log_promo_code(
+            code=promo.code,
+            blogger=promo.blogger_name,
+            active=False,
+            discount_percent=promo.discount_percent,
+            created_at=promo.created_at,
+        )
+    except Exception:
+        logger.exception("Не удалось записать деактивацию промокода в Sheets")
+
+    logger.info(
+        "Промокод %s деактивирован, снято с пользователей: %s",
+        promo.code,
+        cleared,
+    )
+    return promo, cleared
+
+
+async def list_active_promos(session: AsyncSession) -> list[PromoCode]:
+    """Список активных промокодов."""
+    result = await session.execute(
+        select(PromoCode)
+        .where(PromoCode.is_active.is_(True))
+        .order_by(PromoCode.created_at.desc())
+    )
+    return list(result.scalars().all())

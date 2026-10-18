@@ -284,8 +284,10 @@ async def activate_subscription(
             base = until
     new_until = base + timedelta(days=settings.subscription_period_days)
     user.subscription_until = new_until
-    if payment and payment.promo_code and not user.promo_code:
-        user.promo_code = payment.promo_code.upper()
+    # Промокод уже зафиксирован в payment — снимаем с пользователя после оплаты
+    used_promo = (payment.promo_code if payment else None) or user.promo_code
+    if payment is not None:
+        user.promo_code = None
     await session.commit()
 
     if payment:
@@ -295,7 +297,7 @@ async def activate_subscription(
             await sheets_service.log_attribution(
                 telegram_id=user.telegram_id,
                 username=user.username,
-                promo=payment.promo_code or user.promo_code,
+                promo=used_promo,
                 event="subscribe",
                 paid_at=payment.paid_at or now,
                 amount=float(payment.amount),

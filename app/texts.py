@@ -130,6 +130,27 @@ ADMIN_BLOGGER_CREATED = (
     "Блогер: {name}\n"
     "Код: {code}\n"
     "Скидка: {discount}%\n"
-    "Ссылка: {link}"
+    "Ссылка: {link}\n"
+    "{sheets_line}"
+)
+ADMIN_PROMO_OFF_USAGE = (
+    "Отключить промокод:\n"
+    "/promo_off КОД\n\n"
+    "Список активных: /promos"
+)
+ADMIN_PROMO_OFF_DONE = (
+    "Промокод {code} отключён.\n"
+    "Скидка больше не действует.\n"
+    "Снято с пользователей: {cleared}."
+)
+ADMIN_PROMOS_EMPTY = "Активных промокодов нет."
+ADMIN_HELP = (
+    "🛠 Команды админа\n\n"
+    "/blogger — создать промокод блогера (имя → код → скидка %)\n"
+    "/promos — список активных промокодов\n"
+    "/promo_off КОД — отключить промокод\n"
+    "/sheets_test — проверить запись в Google Sheets\n"
+    "/admin — этот список\n\n"
+    "Админы задаются в ADMIN_TELEGRAM_IDS."
 )
 ADMIN_ONLY = "Эта команда только для админов."
