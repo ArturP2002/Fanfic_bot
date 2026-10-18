@@ -94,5 +94,6 @@ def test_ficbook_search_url_uses_search_path():
     from app.services.platform_search import ficbook_search_url
 
     url = ficbook_search_url("Рождество Темис")
-    assert "/search/fanfiction" in url
+    assert "/search_fanfics?query=" in url
+    assert "/search/fanfiction" not in url
     assert "/find?" not in url

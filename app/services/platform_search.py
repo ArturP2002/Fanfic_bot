@@ -17,13 +17,24 @@ from app.services.parsers.base import ParsedWork, fetch_html, parse_fic_url
 logger = logging.getLogger(__name__)
 
 HIGH_SCORE = 92
+# Уверенный единственный кандидат — достаточно для авто-парсинга страницы
+AUTO_PARSE_SCORE = 88
 MEDIUM_SCORE = 78
 _MAX_SEARCHES_PER_BATCH_DEFAULT = 15
 # Поиск не должен съедать весь ARQ job_timeout после долгого скачивания рилса
-_SEARCH_HTTP_TIMEOUT = 12.0
+_SEARCH_HTTP_TIMEOUT = 14.0
 _SEARCH_HTTP_ATTEMPTS = 2
-_ENRICH_PER_TITLE_TIMEOUT = 35.0
+_ENRICH_PER_TITLE_TIMEOUT = 45.0
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+_EMPTY_RESULT_RE = re.compile(
+    r"ничего\s+не\s+найдено|по\s+вашему\s+запросу\s+ничего|нет\s+результатов",
+    re.I,
+)
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def _max_searches_per_batch() -> int:
@@ -72,7 +83,28 @@ def score_hit(query_title: str, query_author: str | None, hit: SearchHit) -> flo
     norm_h = normalize_text(hit.title)
     if not norm_q or not norm_h:
         return 0.0
-    score = float(fuzz.token_set_ratio(norm_q, norm_h))
+
+    # Алиасы вида «Скованные/Manacled» или «A | B»
+    aliases = [
+        normalize_text(p)
+        for p in re.split(r"[/|]", hit.title or "")
+        if p and p.strip()
+    ]
+    if norm_h not in aliases:
+        aliases.append(norm_h)
+
+    if norm_q in aliases or norm_q == norm_h:
+        score = 100.0
+    else:
+        # WRatio менее щедр, чем token_set, к коротким запросам в длинных названиях
+        score = float(fuzz.WRatio(norm_q, norm_h))
+        for alias in aliases:
+            if alias:
+                score = max(score, float(fuzz.ratio(norm_q, alias)))
+        # «Омут» ⊂ «Омут потерянной вечности» — не auto-high
+        if score >= HIGH_SCORE and len(norm_h) > len(norm_q) + max(6, len(norm_q) // 2):
+            score = min(score, float(MEDIUM_SCORE + 5))
+
     if query_author and hit.author:
         author_score = float(
             fuzz.token_set_ratio(normalize_text(query_author), normalize_text(hit.author))
@@ -125,14 +157,30 @@ def parse_ao3_search_html(html: str) -> list[SearchHit]:
     return hits
 
 
+def _ficbook_page_is_empty(html: str) -> bool:
+    """True, если в выдаче явно «ничего не найдено» (premium-баннеры не считаем)."""
+    return bool(_EMPTY_RESULT_RE.search(html or ""))
+
+
 def parse_ficbook_search_html(html: str) -> list[SearchHit]:
     """Парсит страницу результатов поиска Ficbook."""
+    if _ficbook_page_is_empty(html):
+        return []
+
     soup = BeautifulSoup(html, "lxml")
     hits: list[SearchHit] = []
-    # Карточки: a с /readfic/
     seen: set[str] = set()
-    for a in soup.select("a[href*='/readfic/']"):
+
+    # Приоритет: заголовки карточек, не рекламные visit-link
+    anchors = list(soup.select("h3.fanfic-inline-title a.visit-link[href*='/readfic/']"))
+    if not anchors:
+        anchors = list(soup.select("a.visit-link[href*='/readfic/'], a[href*='/readfic/']"))
+
+    for a in anchors:
         href = a.get("href") or ""
+        # Реклама / премиум-промо в «пустой» выдаче
+        if "source=premium" in href or "from_promo=" in href or "premiumVisit=" in href:
+            continue
         m = re.search(r"(/readfic/[\w-]+)", href)
         if not m:
             continue
@@ -142,7 +190,6 @@ def parse_ficbook_search_html(html: str) -> list[SearchHit]:
         title = a.get_text(" ", strip=True)
         if not title or len(title) < 2:
             continue
-        # пропускаем служебные ссылки вроде «Читать»
         if title.lower() in {"читать", "целиком", "по главам"}:
             continue
         seen.add(path)
@@ -175,18 +222,47 @@ def ao3_search_url(title: str, author: str | None = None) -> str:
 
 
 def ficbook_search_url(title: str, author: str | None = None) -> str:
-    # /find часто отдаёт 403 ботам; search/fanfiction стабильнее
+    """Актуальный поиск Ficbook (старый /search/fanfiction отдаёт 404)."""
     q = title if not author else f"{title} {author}"
-    return f"https://ficbook.net/search/fanfiction?q={quote_plus(q)}"
+    return f"https://ficbook.net/search_fanfics?query={quote_plus(q)}"
+
+
+def ficbook_find_url(title: str, author: str | None = None) -> str:
+    """Расширенный поиск по названию (/find часто 403 для ботов — fallback)."""
+    params: dict[str, str] = {"title": title}
+    if author:
+        params["author1"] = author
+    return "https://ficbook.net/find?" + urlencode(params)
 
 
 async def _fetch_search_html(url: str) -> str:
-    """Быстрый fetch для поиска: короткий timeout, мало ретраев."""
+    """Быстрый fetch для поиска: короткий timeout, browser UA."""
     return await fetch_html(
         url,
         timeout=_SEARCH_HTTP_TIMEOUT,
         attempts=_SEARCH_HTTP_ATTEMPTS,
+        user_agent=_BROWSER_UA,
+        referer="https://ficbook.net/" if "ficbook.net" in url else None,
     )
+
+
+async def _search_ficbook(title: str, author: str | None) -> list[SearchHit]:
+    """search_fanfics; при пустой выдаче — попытка /find (может быть 403)."""
+    url = ficbook_search_url(title, author)
+    html = await _fetch_search_html(url)
+    hits = parse_ficbook_search_html(html)
+    if hits:
+        return hits
+    # Fallback: точный поиск по title (часто закрыт antifraud)
+    try:
+        find_html = await _fetch_search_html(ficbook_find_url(title, author))
+        if "Проверка безопасности" in find_html or "Just a moment" in find_html:
+            logger.info("Ficbook /find заблокирован antifraud для «%s»", title)
+            return []
+        return parse_ficbook_search_html(find_html)
+    except Exception as exc:
+        logger.info("Ficbook /find недоступен для «%s»: %s", title, exc)
+        return []
 
 
 async def _search_one_platform(
@@ -199,9 +275,7 @@ async def _search_one_platform(
             html = await _fetch_search_html(url)
             hits = parse_ao3_search_html(html)
         else:
-            url = ficbook_search_url(title, author)
-            html = await _fetch_search_html(url)
-            hits = parse_ficbook_search_html(html)
+            hits = await _search_ficbook(title, author)
         logger.info(
             "Поиск %s «%s»: кандидатов=%s",
             platform,
@@ -215,6 +289,8 @@ async def _search_one_platform(
         lower = err.lower()
         if "403" in lower or "forbidden" in lower:
             hint = " (возможен блок площадки / нужен SOCKS5_PROXY)"
+        elif "404" in lower or "not found" in lower:
+            hint = " (URL поиска устарел?)"
         elif "timeout" in lower or "timed out" in lower:
             hint = " (таймаут)"
         logger.warning(
@@ -225,6 +301,20 @@ async def _search_one_platform(
             exc,
         )
         return []
+
+
+def _should_auto_parse(ranked: list[SearchHit]) -> bool:
+    """Единственный уверенный хит — парсим страницу без вопроса пользователю."""
+    if not ranked:
+        return False
+    best = ranked[0]
+    if best.score >= HIGH_SCORE:
+        high_peers = [h for h in ranked if h.score >= HIGH_SCORE]
+        return len(high_peers) == 1
+    if best.score >= AUTO_PARSE_SCORE:
+        second = ranked[1].score if len(ranked) > 1 else 0.0
+        return (best.score - second) >= 8.0
+    return False
 
 
 async def _enrich_from_platforms_inner(
@@ -247,15 +337,14 @@ async def _enrich_from_platforms_inner(
         return EnrichmentResult(confidence="none", hits=[])
 
     best = ranked[0]
-    high_peers = [h for h in ranked if h.score >= HIGH_SCORE]
-    if len(high_peers) == 1 and best.score >= HIGH_SCORE:
+    if _should_auto_parse(ranked):
         try:
             parsed = await parse_fic_url(best.url)
         except Exception:
             logger.exception("Не удалось разобрать страницу %s", best.url)
-            return EnrichmentResult(confidence="medium", hits=ranked[:3])
+            return EnrichmentResult(confidence="medium", hits=ranked[:5])
         if not parsed:
-            return EnrichmentResult(confidence="medium", hits=ranked[:3])
+            return EnrichmentResult(confidence="medium", hits=ranked[:5])
         # если автор запроса есть и сильно расходится — понижаем
         if author and parsed.author:
             author_score = fuzz.token_set_ratio(
@@ -267,12 +356,12 @@ async def _enrich_from_platforms_inner(
                     author,
                     parsed.author,
                 )
-                return EnrichmentResult(confidence="medium", hits=ranked[:3], parsed=parsed)
-        return EnrichmentResult(confidence="high", parsed=parsed, hits=ranked[:3])
+                return EnrichmentResult(confidence="medium", hits=ranked[:5], parsed=parsed)
+        return EnrichmentResult(confidence="high", parsed=parsed, hits=ranked[:5])
 
     if best.score >= MEDIUM_SCORE:
-        return EnrichmentResult(confidence="medium", hits=ranked[:3])
-    return EnrichmentResult(confidence="none", hits=ranked[:3])
+        return EnrichmentResult(confidence="medium", hits=ranked[:5])
+    return EnrichmentResult(confidence="none", hits=ranked[:5])
 
 
 async def enrich_from_platforms(

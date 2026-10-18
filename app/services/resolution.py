@@ -12,6 +12,7 @@ from app.models.enums import ConfirmationStatus, ReadingStatus
 from app.services import library as library_service
 from app.services.extract import ExtractedWork, _is_valid_title
 from app.services.matching import find_matches
+from app.services.normalize import normalize_text
 from app.services.platform_search import SearchBudget, SearchHit, enrich_from_platforms
 from app.services.works import (
     create_work,
@@ -25,6 +26,21 @@ from app.services.works import (
 _AUTO_CREATE_CONFIDENCE = 0.7
 
 logger = logging.getLogger(__name__)
+
+
+def _dedupe_extracted(items: list[ExtractedWork]) -> list[ExtractedWork]:
+    """Убирает повторы одного названия в пакете (OCR+speech часто дублируют)."""
+    seen: set[str] = set()
+    out: list[ExtractedWork] = []
+    for item in items:
+        key = normalize_text(item.title)
+        if not key or key in seen:
+            if key in seen:
+                logger.info("Пропуск дубля extract «%s»", item.title)
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 @dataclass
@@ -88,6 +104,38 @@ class ResolutionBatch:
         ]
 
 
+async def _create_from_ocr_dossier(
+    session: AsyncSession,
+    item: ExtractedWork,
+) -> Work:
+    """Создаёт работу из карточки Ficbook/AO3, уже прочитанной в OCR."""
+    author_ok = bool(item.author)
+    work = await create_work(
+        session,
+        title=item.title,
+        author=item.author,
+        fandom=item.fandom,
+        pairing=item.pairing,
+        status=item.status or "unknown",
+        word_count=item.word_count,
+        volume_label=volume_from_words(item.word_count),
+        tags=item.tags,
+        confirmation_status=(
+            ConfirmationStatus.CONFIRMED.value
+            if author_ok and item.has_dossier_meta
+            else ConfirmationStatus.NEEDS_REVIEW.value
+        ),
+    )
+    logger.info(
+        "OCR-досье: новая work_id=%s «%s» words=%s fandom=%s",
+        work.id,
+        work.title,
+        item.word_count,
+        item.fandom,
+    )
+    return work
+
+
 async def _create_from_platform_enrichment(
     session: AsyncSession,
     item: ExtractedWork,
@@ -99,6 +147,14 @@ async def _create_from_platform_enrichment(
     Returns:
         (work|None, match_confidence, needs_confirm, platform_hits)
     """
+    # Карточка уже в OCR — не тратим бюджет поиска и не ждём пустую выдачу
+    if item.from_ocr_dossier and item.has_dossier_meta:
+        work = await _create_from_ocr_dossier(session, item)
+        needs_confirm = (
+            work.confirmation_status == ConfirmationStatus.NEEDS_REVIEW.value
+        )
+        return work, "high", needs_confirm, []
+
     if not search_budget.take():
         logger.info("Лимит внешних поисков исчерпан — без enrich для «%s»", item.title)
         return None, "none", True, []
@@ -123,11 +179,11 @@ async def _create_from_platform_enrichment(
             await enrich_work(
                 session,
                 existing,
-                fandom=parsed.fandom,
-                pairing=parsed.pairing,
-                status=parsed.status,
-                word_count=parsed.word_count,
-                tags=parsed.tags,
+                fandom=parsed.fandom or item.fandom,
+                pairing=parsed.pairing or item.pairing,
+                status=parsed.status or item.status,
+                word_count=parsed.word_count or item.word_count,
+                tags=parsed.tags or item.tags,
                 source_url=parsed.source_url,
                 extra_titles=[item.title, parsed.title],
             )
@@ -146,12 +202,12 @@ async def _create_from_platform_enrichment(
             session,
             title=parsed.title or item.title,
             author=parsed.author or item.author,
-            fandom=parsed.fandom,
-            pairing=parsed.pairing,
-            status=parsed.status or "unknown",
-            word_count=parsed.word_count,
-            volume_label=volume_from_words(parsed.word_count),
-            tags=parsed.tags,
+            fandom=parsed.fandom or item.fandom,
+            pairing=parsed.pairing or item.pairing,
+            status=parsed.status or item.status or "unknown",
+            word_count=parsed.word_count or item.word_count,
+            volume_label=volume_from_words(parsed.word_count or item.word_count),
+            tags=parsed.tags or item.tags,
             source_url=parsed.source_url,
             confirmation_status=(
                 ConfirmationStatus.CONFIRMED.value
@@ -171,6 +227,14 @@ async def _create_from_platform_enrichment(
             needs_confirm,
         )
         return work, "high", needs_confirm, hits
+
+    # Поиск не нашёл URL, но OCR уже дал досье — создаём с метаданными
+    if item.has_dossier_meta:
+        work = await _create_from_ocr_dossier(session, item)
+        needs_confirm = (
+            work.confirmation_status == ConfirmationStatus.NEEDS_REVIEW.value
+        )
+        return work, "high", needs_confirm, hits[:5]
 
     if result.confidence == "medium" and hits:
         logger.info(
@@ -212,6 +276,7 @@ async def resolve_extracted(
     batch = ResolutionBatch()
     seen_work_ids: set[int] = set()
     search_budget = SearchBudget()
+    extracted = _dedupe_extracted(extracted)
 
     for item in extracted:
         match = await find_matches(session, item.title, item.author)

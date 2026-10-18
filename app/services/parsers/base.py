@@ -87,17 +87,22 @@ async def fetch_html(
     *,
     timeout: float = 30.0,
     attempts: int = FETCH_ATTEMPTS,
+    user_agent: str | None = None,
+    referer: str | None = None,
 ) -> str:
     """Загружает HTML страницы, повторяя запрос при временных сбоях."""
     import httpx
 
     headers = {
-        "User-Agent": (
+        "User-Agent": user_agent
+        or (
             "Mozilla/5.0 (compatible; FicBrainBot/1.0; +https://t.me/; metadata only)"
         ),
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ru,en;q=0.9",
     }
+    if referer:
+        headers["Referer"] = referer
     max_attempts = max(1, attempts)
     async with httpx_client(timeout=timeout) as client:
         for attempt in range(1, max_attempts + 1):

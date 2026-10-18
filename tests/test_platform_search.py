@@ -34,14 +34,26 @@ AO3_SEARCH_HTML = """
 FICBOOK_SEARCH_HTML = """
 <html><body>
 <div class="fanfic-inline">
-  <a href="/readfic/123456">Моя маленькая пташка</a>
+  <h3 class="fanfic-inline-title">
+    <a class="visit-link" href="/readfic/123456">Моя маленькая пташка</a>
+  </h3>
   <a href="/authors/42">IsForGood</a>
 </div>
 <article>
-  <a href="/readfic/abc-def">Приютные ошибки</a>
+  <h3 class="fanfic-inline-title">
+    <a class="visit-link" href="/readfic/abc-def">Приютные ошибки</a>
+  </h3>
   <a class="author" href="/authors/7">AuthorRu</a>
 </article>
 <a href="/readfic/123456">Читать</a>
+<a class="visit-link" href="/readfic/999?source=premium&premiumVisit=1">Реклама</a>
+</body></html>
+"""
+
+FICBOOK_EMPTY_HTML = """
+<html><body>
+<p>По вашему запросу ничего не найдено</p>
+<a class="visit-link" href="/readfic/111?source=premium&premiumVisit=1">Стая.</a>
 </body></html>
 """
 
@@ -66,8 +78,42 @@ def test_parse_ficbook_search_html():
     assert "Моя маленькая пташка" in titles
     assert "Приютные ошибки" in titles
     assert "Читать" not in titles
+    assert "Реклама" not in titles
     bird = next(h for h in hits if "пташка" in h.title)
     assert bird.url.startswith("https://ficbook.net/readfic/")
+
+
+def test_parse_ficbook_empty_ignores_premium():
+    from app.services.platform_search import parse_ficbook_search_html as parse
+
+    assert parse(FICBOOK_EMPTY_HTML) == []
+
+
+def test_score_slash_title_alias():
+    hit = SearchHit(
+        title="Скованные/Manacled",
+        author="X",
+        url="https://ficbook.net/readfic/1",
+        platform="ficbook",
+    )
+    assert score_hit("Manacled", None, hit) >= 92
+
+
+def test_score_short_query_not_auto_high_on_long_title():
+    long_hit = SearchHit(
+        title="Омут потерянной вечности",
+        author="A",
+        url="https://ficbook.net/readfic/1",
+        platform="ficbook",
+    )
+    loose = SearchHit(
+        title="Сhain manacled hands",
+        author="B",
+        url="https://ficbook.net/readfic/2",
+        platform="ficbook",
+    )
+    assert score_hit("Омут", None, long_hit) < 92
+    assert score_hit("Manacled", None, loose) < 92
 
 
 def test_score_and_rank_high_match():

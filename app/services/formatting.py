@@ -141,7 +141,9 @@ def format_batch_list(batch: ResolutionBatch) -> str:
         elif item.platform_hits and not item.work:
             lines.append("   выбери вариант из поиска AO3/Ficbook")
         elif item.work or item.needs_catalog_confirm:
-            lines.append("   пока только название; метаданные появятся после обогащения / ссылки")
+            lines.append(
+                "   пока только название — пришли ссылку AO3/Ficbook, если знаешь"
+            )
     return "\n".join(lines)
 
 
