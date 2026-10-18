@@ -57,7 +57,37 @@ async def blogger_code(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     data = await state.get_data()
     name = data.get("blogger_name") or ""
-    code = None if raw.lower() in {"авто", "auto", "gen", "сгенерировать"} else raw
+    if raw.lower() in {"авто", "auto", "gen", "сгенерировать"}:
+        code = promo_service.generate_code()
+    else:
+        code = promo_service.normalize_code(raw)
+        if not promo_service.is_valid_code_format(code):
+            await message.answer(
+                "Код: 3–32 символа (латиница, цифры, _ или -). Или напиши «авто»."
+            )
+            return
+
+    await state.update_data(promo_code=code)
+    await state.set_state(AdminBloggerStates.waiting_discount)
+    await message.answer(texts.ADMIN_BLOGGER_ASK_DISCOUNT.format(code=code))
+
+
+@router.message(AdminBloggerStates.waiting_discount)
+async def blogger_discount(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer(texts.ADMIN_ONLY)
+        return
+
+    try:
+        discount = promo_service.parse_discount_percent(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    data = await state.get_data()
+    name = data.get("blogger_name") or ""
+    code = data.get("promo_code")
 
     try:
         async with async_session_factory() as session:
@@ -65,6 +95,7 @@ async def blogger_code(message: Message, state: FSMContext) -> None:
                 session,
                 blogger_name=name,
                 code=code,
+                discount_percent=discount,
                 created_by_telegram_id=message.from_user.id,
             )
     except ValueError as exc:
@@ -77,7 +108,6 @@ async def blogger_code(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    # Попробуем собрать реальную deep-link с username бота
     me = await message.bot.get_me()
     username = me.username or "<bot>"
     link = f"https://t.me/{username}?start=promo_{promo.code}"
@@ -85,6 +115,7 @@ async def blogger_code(message: Message, state: FSMContext) -> None:
         texts.ADMIN_BLOGGER_CREATED.format(
             name=promo.blogger_name,
             code=promo.code,
+            discount=promo.discount_percent,
             link=link,
         )
     )

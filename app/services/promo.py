@@ -6,10 +6,12 @@ import logging
 import re
 import secrets
 import string
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import PromoCode, User
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,37 @@ def generate_code(length: int = 8) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def parse_discount_percent(raw: str) -> int:
+    """Парсит скидку 0–100 из текста пользователя."""
+    text = (raw or "").strip().replace("%", "").replace(",", ".")
+    if not text:
+        raise ValueError("Укажи число от 0 до 100")
+    try:
+        value = int(float(text))
+    except ValueError as exc:
+        raise ValueError("Укажи целое число от 0 до 100") from exc
+    if value < 0 or value > 100:
+        raise ValueError("Скидка должна быть от 0 до 100%")
+    return value
+
+
+def price_with_discount(base_rub: int | Decimal, discount_percent: int) -> Decimal:
+    """Цена после скидки (минимум 1 ₽, если база > 0 и скидка < 100)."""
+    base = Decimal(str(base_rub))
+    pct = max(0, min(100, int(discount_percent)))
+    if pct <= 0:
+        return base.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if pct >= 100:
+        return Decimal("0.00")
+    amount = (base * (Decimal(100) - Decimal(pct)) / Decimal(100)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    if base > 0 and amount < Decimal("1.00"):
+        return Decimal("1.00")
+    return amount
+
+
 async def get_active_promo(session: AsyncSession, code: str) -> PromoCode | None:
     """Активный промокод по коду."""
     normalized = normalize_code(code)
@@ -48,17 +81,27 @@ async def get_active_promo(session: AsyncSession, code: str) -> PromoCode | None
     return result.scalar_one_or_none()
 
 
+async def get_user_promo(session: AsyncSession, user: User) -> PromoCode | None:
+    """Активный промокод, привязанный к пользователю."""
+    if not user.promo_code:
+        return None
+    return await get_active_promo(session, user.promo_code)
+
+
 async def create_promo(
     session: AsyncSession,
     *,
     blogger_name: str,
     code: str | None,
+    discount_percent: int = 0,
     created_by_telegram_id: int | None,
 ) -> PromoCode:
     """Создаёт промокод и пишет в Sheets."""
     name = (blogger_name or "").strip()
     if not name:
         raise ValueError("Укажи имя блогера")
+
+    discount = parse_discount_percent(str(discount_percent))
 
     if code:
         normalized = normalize_code(code)
@@ -86,6 +129,7 @@ async def create_promo(
     promo = PromoCode(
         code=normalized,
         blogger_name=name,
+        discount_percent=discount,
         is_active=True,
         created_by_telegram_id=created_by_telegram_id,
     )
@@ -100,15 +144,17 @@ async def create_promo(
             code=promo.code,
             blogger=promo.blogger_name,
             active=True,
+            discount_percent=promo.discount_percent,
             created_at=promo.created_at,
         )
     except Exception:
         logger.exception("Не удалось записать промокод в Sheets")
 
     logger.info(
-        "Создан промокод %s для «%s» by=%s",
+        "Создан промокод %s для «%s» discount=%s%% by=%s",
         promo.code,
         promo.blogger_name,
+        promo.discount_percent,
         created_by_telegram_id,
     )
     return promo
@@ -132,7 +178,10 @@ async def attach_promo_to_user(
         return False, "Промокод не найден или неактивен."
 
     if user.promo_code and user.promo_code.upper() == promo.code:
-        return True, f"Промокод {promo.code} уже привязан."
+        msg = f"Промокод {promo.code} уже привязан."
+        if promo.discount_percent:
+            msg += f" Скидка {promo.discount_percent}%."
+        return True, msg
 
     if user.promo_code and not force:
         return (
@@ -156,4 +205,16 @@ async def attach_promo_to_user(
     except Exception:
         logger.exception("Не удалось записать атрибуцию start в Sheets")
 
-    return True, f"Промокод {promo.code} ({promo.blogger_name}) сохранён. Спасибо!"
+    settings = get_settings()
+    final = price_with_discount(
+        settings.subscription_price_rub, promo.discount_percent
+    )
+    msg = f"Промокод {promo.code} сохранён."
+    if promo.discount_percent:
+        msg += (
+            f" Скидка {promo.discount_percent}% — "
+            f"подписка {final:.0f} ₽ вместо {settings.subscription_price_rub} ₽."
+        )
+    else:
+        msg += f" ({promo.blogger_name})"
+    return True, msg

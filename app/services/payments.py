@@ -1,4 +1,4 @@
-"""Интеграция с ЮKassa: создание и проверка платежей."""
+"""Интеграция с ЮKassa: создание и проверка платежей (+ демо без ключей)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import Payment, User
+from app.services import promo as promo_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,20 @@ class PaymentError(Exception):
     """Ошибка платёжного сервиса."""
 
 
+def yookassa_keys_configured() -> bool:
+    settings = get_settings()
+    return bool(settings.yookassa_shop_id and settings.yookassa_secret_key)
+
+
+def is_demo_payment_mode() -> bool:
+    """Тестовый режим без ключей ЮKassa — локальная демо-оплата."""
+    settings = get_settings()
+    return settings.yookassa_test_mode and not yookassa_keys_configured()
+
+
 def _configure_yookassa() -> None:
     settings = get_settings()
-    if not settings.yookassa_shop_id or not settings.yookassa_secret_key:
+    if not yookassa_keys_configured():
         raise PaymentError(
             "ЮKassa не настроена: задай YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env"
         )
@@ -37,20 +49,59 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def resolve_payment_amount(
+    session: AsyncSession,
+    user: User,
+    *,
+    promo_code: str | None = None,
+) -> tuple[Decimal, int, str | None]:
+    """Сумма к оплате с учётом промо.
+
+    Returns:
+        (amount, discount_percent, promo_code_or_none)
+    """
+    settings = get_settings()
+    base = Decimal(str(settings.subscription_price_rub))
+    code = promo_code or user.promo_code
+    discount = 0
+    if code:
+        promo = await promo_service.get_active_promo(session, code)
+        if promo:
+            discount = int(promo.discount_percent or 0)
+            code = promo.code
+        else:
+            code = None
+    amount = promo_service.price_with_discount(base, discount)
+    return amount, discount, code
+
+
 async def create_subscription_payment(
     session: AsyncSession,
     user: User,
     *,
     promo_code: str | None = None,
 ) -> Payment:
-    """Создаёт платёж в ЮKassa и сохраняет запись в БД."""
+    """Создаёт платёж (ЮKassa или демо) и сохраняет запись в БД."""
     settings = get_settings()
-    _configure_yookassa()
+    amount, discount, resolved_promo = await resolve_payment_amount(
+        session, user, promo_code=promo_code
+    )
 
+    if is_demo_payment_mode():
+        return await _create_demo_payment(
+            session,
+            user,
+            amount=amount,
+            promo_code=resolved_promo,
+            discount_percent=discount,
+        )
+
+    _configure_yookassa()
     from yookassa import Payment as YooPayment
 
-    amount = Decimal(str(settings.subscription_price_rub))
     description = f"FicBrain: годовая подписка ({settings.subscription_period_days} дн.)"
+    if discount:
+        description += f", скидка {discount}%"
     if settings.yookassa_test_mode:
         description = "[TEST] " + description
 
@@ -58,12 +109,11 @@ async def create_subscription_payment(
     metadata = {
         "user_id": str(user.id),
         "telegram_id": str(user.telegram_id),
-        "promo_code": (promo_code or user.promo_code or "")[:64],
+        "promo_code": (resolved_promo or "")[:64],
+        "discount_percent": str(discount),
     }
 
     try:
-        # Режим test/live определяется ключами магазина.
-        # YOOKASSA_TEST_MODE помечает запись и описание для модерации.
         payload = {
             "amount": {
                 "value": f"{amount:.2f}",
@@ -94,7 +144,6 @@ async def create_subscription_payment(
     if not payment_id:
         raise PaymentError("ЮKassa не вернула id платежа")
 
-    # В ответе API есть флаг test; иначе берём из env
     is_test = bool(getattr(response, "test", settings.yookassa_test_mode))
 
     payment = Payment(
@@ -104,19 +153,52 @@ async def create_subscription_payment(
         currency="RUB",
         status=status,
         is_test=is_test,
-        promo_code=promo_code or user.promo_code,
+        promo_code=resolved_promo,
         confirmation_url=confirmation_url,
     )
     session.add(payment)
     await session.commit()
     await session.refresh(payment)
     logger.info(
-        "Создан платёж id=%s yookassa=%s user_id=%s test=%s url=%s",
+        "Создан платёж id=%s yookassa=%s user_id=%s test=%s amount=%s",
         payment.id,
         payment_id,
         user.id,
         is_test,
-        bool(confirmation_url),
+        amount,
+    )
+    return payment
+
+
+async def _create_demo_payment(
+    session: AsyncSession,
+    user: User,
+    *,
+    amount: Decimal,
+    promo_code: str | None,
+    discount_percent: int,
+) -> Payment:
+    """Локальный демо-платёж без обращения к ЮKassa."""
+    payment_id = f"demo-{uuid.uuid4().hex[:16]}"
+    payment = Payment(
+        user_id=user.id,
+        yookassa_payment_id=payment_id,
+        amount=amount,
+        currency="RUB",
+        status="pending",
+        is_test=True,
+        promo_code=promo_code,
+        confirmation_url=None,
+    )
+    session.add(payment)
+    await session.commit()
+    await session.refresh(payment)
+    logger.info(
+        "Демо-платёж id=%s user_id=%s amount=%s discount=%s%%",
+        payment.id,
+        user.id,
+        amount,
+        discount_percent,
     )
     return payment
 
@@ -126,30 +208,26 @@ async def get_payment(session: AsyncSession, payment_id: int) -> Payment | None:
     return await session.get(Payment, payment_id)
 
 
-async def get_latest_pending_payment(
-    session: AsyncSession, user_id: int
-) -> Payment | None:
-    """Последний незавершённый платёж пользователя."""
-    result = await session.execute(
-        select(Payment)
-        .where(
-            Payment.user_id == user_id,
-            Payment.status.in_(("pending", "waiting_for_capture")),
-        )
-        .order_by(Payment.created_at.desc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def sync_payment_status(
     session: AsyncSession,
     payment: Payment,
 ) -> Payment:
-    """Запрашивает статус в ЮKassa и при успехе активирует подписку."""
-    settings = get_settings()
-    _configure_yookassa()
+    """Проверяет статус (ЮKassa или демо) и при успехе активирует подписку."""
+    # Демо-платёж: «Проверить оплату» = успешная оплата
+    if str(payment.yookassa_payment_id).startswith("demo-"):
+        if payment.status != "succeeded":
+            payment.status = "succeeded"
+            payment.paid_at = _utcnow()
+            payment.is_test = True
+            user = await session.get(User, payment.user_id)
+            if user:
+                await activate_subscription(session, user, payment=payment)
+            else:
+                await session.commit()
+            await session.refresh(payment)
+        return payment
 
+    _configure_yookassa()
     from yookassa import Payment as YooPayment
 
     try:
@@ -185,8 +263,6 @@ async def sync_payment_status(
         await session.commit()
 
     await session.refresh(payment)
-    # settings used for period in activate
-    _ = settings
     return payment
 
 

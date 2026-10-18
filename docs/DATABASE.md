@@ -9,7 +9,8 @@
 `is_test`, `promo_code`, `confirmation_url`, `created_at`, `paid_at`.
 
 ## promo_codes
-Промокоды блогеров: `code`, `blogger_name`, `is_active`, `created_by_telegram_id`, `created_at`.
+Промокоды блогеров: `code`, `blogger_name`, `discount_percent` (0–100), `is_active`,
+`created_by_telegram_id`, `created_at`.
 
 ## works
 Общая база произведений (одна карточка на фанфик для всех пользователей).

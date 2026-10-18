@@ -33,3 +33,4 @@ class AdminBloggerStates(StatesGroup):
 
     waiting_name = State()
     waiting_code = State()
+    waiting_discount = State()

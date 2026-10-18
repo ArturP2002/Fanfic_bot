@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 SHEET_PROMO = "Промокоды"
 SHEET_ATTR = "Атрибуции"
 
-_PROMO_HEADER = ["код", "блогер", "активен", "создан"]
+_PROMO_HEADER = ["код", "блогер", "скидка_%", "активен", "создан"]
 _ATTR_HEADER = [
     "telegram_id",
     "username",
@@ -114,6 +114,7 @@ async def log_promo_code(
     code: str,
     blogger: str,
     active: bool,
+    discount_percent: int = 0,
     created_at: datetime | None = None,
 ) -> None:
     """Добавляет строку в лист «Промокоды»."""
@@ -122,7 +123,7 @@ async def log_promo_code(
         _append_row_sync,
         SHEET_PROMO,
         _PROMO_HEADER,
-        [code, blogger, "да" if active else "нет", ts],
+        [code, blogger, discount_percent, "да" if active else "нет", ts],
     )
 
 

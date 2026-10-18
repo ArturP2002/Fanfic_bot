@@ -115,17 +115,17 @@ def subscription_status_text(user: User, telegram_id: int) -> str:
     """Текст статуса подписки для UI."""
     settings = get_settings()
     if telegram_id in settings.admin_ids:
-        return "Статус: админ (полный доступ)."
+        return "У тебя полный доступ (админ)."
 
     if has_active_subscription(user):
         until = user.subscription_until
         assert until is not None
         local = until.astimezone(timezone.utc).strftime("%d.%m.%Y")
-        return f"Подписка активна до {local} (UTC)."
+        return f"Подписка активна до {local}."
 
     ensure_free_uses_initialized(user)
     if settings.free_trial_uses <= 0:
-        return "Подписки нет. Бесплатных разборов не предусмотрено."
+        return "Подписки пока нет."
 
     left = user.free_uses_left if user.free_uses_left is not None else 0
-    return f"Подписки нет. Осталось бесплатных разборов: {left}."
+    return f"Подписки пока нет. Бесплатных разборов осталось: {left}."
